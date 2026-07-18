@@ -1,0 +1,156 @@
+# ALMANAC — Build Specification v1.0
+**This is a complete, self-contained spec.** It consolidates all prior design revisions; no other document is needed. Build against this.
+## Mission
+ALMANAC is a browser farming-village life sim in the lineage of Harvest Moon 64, built as a branded game for **Ambrook** (ambrook.com — bookkeeping, payments, invoicing, and insights for farmers and ranchers). The game dramatizes Ambrook's value by showing the counterfactual: **year 1 is life before the town gets connected** (checks in the mail, shoebox receipts, opaque profitability), and then the valley joins the Ambrook network one neighbor at a time and the friction visibly leaves the economy, the schedules, and people's lives.
+One sentence to build toward: *a first-time player finishes year 1 (~20 minutes) in one sitting, starts year 2 unprompted, and later retells what happened to the town as a story about people, not a product.*
+## Development protocol (for the coding agent)
+- Work autonomously, phase by phase (§22). Each phase ends with a runnable single-file artifact and a self-run acceptance check; do not wait for human input between phases. When a design detail is unspecified, choose the option most consistent with the pillars (§1) and note the decision in a comment block at the top of the file.
+- Keep one HTML file throughout. Structure code in clearly-commented sections (CONFIG / RNG / WORLDGEN / RENDER / SIM / CAST / UI / AUDIO / SAVE). All tuning constants live in one CONFIG object at the top.
+- Test at 640×360 internal resolution in a desktop browser and with device emulation for touch after every phase.
+## 1. Pillars (priority order)
+1. **The daily loop is the product.** Every day ends with visible, countable progress. If a day can end feeling wasted, that's a bug.
+2. **Time pressure creates coziness.** Short days force choices; never solve the pressure, curate it. Thematic twin: *time is what the network gives back.*
+3. **People are the endgame — and the deepest friendship is trusted commerce.** No player romance. The player's relationship ceiling is becoming someone the town counts on: standing orders, a shelf of your goods in the general store.
+4. **The seed is the land; the cast is home.** One seed determines the valley layout; the twelve villagers are authored constants, identical in every valley.
+5. **The brand is the water, not the fish.** Ambrook appears diegetically (a flyer, a ledger book, a counter glyph) and mechanically — never as popups or logo walls. Success = players narrate the value prop as a story about neighbors.
+## 2. Hard constraints
+- **Single HTML file.** Vanilla JS + Three.js **r128** from CDN (cdnjs). No build step, framework, backend, or external assets — all textures are generated canvases; all geometry, sprites, portraits, and audio are produced in code.
+- **No localStorage/sessionStorage/IndexedDB.** World = seed in URL hash (`#s=1234567`, "Copy link" shares it). Player life = save code: JSON → Base64, copy-to-clipboard and `.almanac` file download; load by paste or file. Autosave to an in-memory slot every sleep.
+- **Deterministic worldgen**: seeded sfc32 RNG with three streams — `gen` (valley, consumed once), `calendar` (weather + daily flavor, indexed by absolute day number so loads never reshuffle), `live` (moment-to-moment). One `rand(stream)` gateway for all draws. The cast is authored constants, not seeded.
+- **Currency is dollars**, small friendly numbers (seeds ~$20).
+- **No real songs.** All music is original, code-synthesized. Tavern tracks evoke 90s country *as a genre*; never cover or interpolate real melodies.
+- **Touch required**: virtual joystick (bottom-left) + one action button (bottom-right) on `pointer: coarse` devices; `touch-action: none`; controls styled in the UI cream/brown.
+- **Performance: 60 fps** at 640×360 on integrated graphics; use `InstancedMesh` for tiles/crops/trees and merged geometry for buildings.
+- **No player romance, no marriage, no flirt dialogue.** One NPC-NPC romance exists (§12) and belongs to the NPCs.
+- Zero data capture, signups, or gates in-game. One Ambrook mark + link on the title screen; one on the exported year-review; none during play.
+## 3. Art direction — "Sharpened HM64" (prototype-validated recipes)
+**Goal:** HM64's soft clay-diorama warmth — muted palette, fixed perspective, pre-rendered feel — with the N64's blur replaced by crisp, deliberate rendering. Soft forms, sharp pixels. Modernize invisibly.
+- **Camera:** `OrthographicCamera`, fixed offset `(0, 14, 12)` from a follow point (≈40° pitch, yaw 0 — every storefront faces the player). Follow point lerps toward the player at ~0.06/frame (soft leash + small deadzone). No rotation, no player zoom; frustum sized from a per-zone world-height (≈13 town / 15 farm / 11 interiors), eased slowly on zone crossings. Frustum from world-height × aspect.
+- **Resolution:** render straight to a fixed **640×360** canvas — `renderer.setSize(640,360,false)`, `setPixelRatio(1)` — upscaled via CSS `image-rendering: pixelated`, letterboxed. No render-target pipeline unless a full-screen shader is later required.
+- **Textures:** procedural 64px canvases (flat base + speckle + a few painted lines); `magFilter = minFilter = NearestFilter`, `generateMipmaps = false`. `MeshLambertMaterial` everywhere; `MeshBasicMaterial` only for blob shadows/decals/highlights.
+- **Lighting (the clay secret):** `AmbientLight` ~0.78 + warm-white `DirectionalLight` (`0xfff4e0`) ~0.55 **repositioned to the camera every frame**, its `target` set to the look-at point (call `target.updateMatrixWorld()`). Never a sun-angle key light. No dynamic shadows: radial-gradient **blob shadow** quads under characters/props (y≈0.005–0.01), larger fainter stacked blobs under buildings/trees. Subtle warm vertex-AO allowed.
+- **Time of day = grade, not relight:** two full-screen CSS overlay divs — one `mix-blend-mode: soft-light`, one `multiply` — with 1.2s transitions, plus `scene.background`/fog swaps and a night ambient dip to ~0.55. Evening: `#E8A87C` soft-light @50% + `#e0c0b0` multiply @25%. Night: `#8a94c0` soft-light @30% + `#4A5578` multiply @42%. Windows go emissive by *texture swap* at dusk, not point lights.
+- **Palette (law; ~40–60% saturation, no pure black/white, warm shadows):** grass `#7FA86A`/shade `#5E8A55`, tilled `#8A6248`, watered `#6B4A3A`, path `#B99A6B`, wood `#A97B55`, roof red `#B3574C`, roof teal `#5E8E8A`, stone `#9C9C94`, water `#6FA3B8`, sky `#BFDCE8`, UI cream `#F2E8CE`, UI border `#7A5C3E`, text `#3E3226`. **Ledger green `#4E7A5A`** is the single brand accent, used ONLY for: the Ledger book/tab, connected-shop counter glyphs, and the year-review export frame.
+- **Geometry:** low-poly (100–800 tris per building/prop), rounded silhouettes, chunky proportions (house ≈ 3× character height, fat roofs, oversized doors), sparse scenes — emptiness is part of the look. Roof prisms: triangle `Shape` → `ExtrudeGeometry` (bevel off), translate to center depth, `rotateY(π/2)`. **r128 gotchas:** no `CapsuleGeometry` (feature-check or use cylinders); directional light targets must be moved + `updateMatrixWorld()`; lay flat decals at staggered y-offsets (0.005/0.008/0.012/0.02) to avoid z-fighting.
+- **Water:** two speckled canvas frames swapped every 0.5s (`material.needsUpdate = true`).
+- **Characters:** super-deformed (head ≈ ⅓ height, stubby limbs, dot eyes). Author each of the 13 (player + 12) as code-built low-poly chibis, then **bake at boot**: render each under the headlamp light from 8 directions × 4 walk frames (+ idle, tool, emote) into a canvas sprite atlas ~96px tall; display as Y-sorted billboard quads, nearest-filtered. Fallback if baking fights: live 3D chibis (reads 95% right under the same lighting). Animation: position at 60fps, pose stepped on an 8fps timer through `[0,1,0,-1]` swing; ~0.18s sine hop on tool use.
+- **Portraits:** per-villager hand-authored busts (~160px) drawn to canvas at boot from layered shapes in the muted palette; 3–5 expressions (neutral/happy/sad/surprised). Shown left of the text box.
+- **Effects allowed:** low-count camera-space particle quads (petals/leaves/rain/snow/fireflies), 3-frame chimney smoke and dust puffs, rain desaturating wash + darker soil, fade-to-cream or iris transitions. **Forbidden:** bloom, DoF, SSAO, dynamic shadows, lens flares, screen shake >2px, UI gradients.
+- **Register:** timeless rural Americana — gravel roads, board fences, mailboxes on posts, a water tower/grain elevator silhouette, a gazebo square. Not medieval, not photoreal.
+## 4. Controls
+- **Move:** WASD/arrows/joystick, free 8-direction analog; run is free (stamina is for tools, not travel).
+- **One smart button:** `E`/click/tap context-acts on the faced target — wild tile→clear, cleared→till, tilled→plant(held seeds)/water, villager→talk (or gift if giftable held), door→enter, forage→pick, bin→ship held stack, water edge with rod→cast. Auto-tool by tile state; **hold `E`/long-press opens a radial ring** (tools + held item) for ambiguous cases (which seeds, gift vs. talk). No hotbar; the inventory (Tab) assigns the held-item slot shown bottom-right.
+- **Targeting:** target tile = player pos + facing × 0.9, floored to grid; cream quad ~25% opacity, slow sine pulse; red tint when invalid; guarded vs. building footprints/edges.
+- `Tab` menu, `J` journal, `M` map, `H` hide UI, `Esc` back. Menus fully keyboard-navigable; mouse/touch layered on.
+- **Stamina: hidden.** No meter. Tool swings cost 2–4; food restores. Diegetic tells: ~50% idle slump + heavier swing sound; ~25% sweat-drop sprite + slower swings; ~10% stumble frames + edge vignette; 0 = tools crawl. Midnight collapse costs part of tomorrow + a rueful Journal line. Tab menu shows a word only (Rested/Fine/Tired/Exhausted). Isolde comments on visible exhaustion. Year 1 cannot drop below "Tired."
+## 5. Time architecture (seasonal daylight)
+- **Calendar: 12-day years, 3-day seasons**, uniform forever. Day 3 of every season is **Restday** (shops shut; tavern full at night). No weeks otherwise.
+- **Day = 6:00→24:00 game time; wall-clock length varies by season like daylight:** spring ~5.5 min, summer ~6 min, autumn ~4 min, winter ~3 min of *outdoor* time. Time pauses indoors, in menus, and during scenes/festivals. The dusk grade starts earlier in winter (≈17:00) and later in summer (≈21:00). Sleep available from 18:00; pass-out at 24:00.
+- **The player arrives in autumn.** Year 1 = autumn + winter only = **~21 minutes** — the authored prologue (§14). Full years thereafter = 3×(5.5+6+4+3) ≈ **55 minutes**. Year 2 day 1 is the player's *first spring*: longest days they've had, cleared field, same-day money — the tutorial ends where farming games usually begin.
+- Fixed-timestep sim (game-hour ticks), interpolated rendering. All systems are **day-indexed**; day length is purely presentational.
+- **Rollover at 6:00** (sacred, in order): bin payout → check-mail processing → crop growth (watered crops advance; 2 dry days kill a seedling) → watered flags clear (unless rain) → weather from `calendar[dayIndex]` → forage/fish respawns → villager schedules assembled → mail/festival/arc flags → contract fulfillment (Restdays) → autosave → yesterday's Journal entry finalizes.
+## 6. World generation (per seed, with a brief "raising the valley" progress line)
+1. **Terrain:** contiguous ~**240×180 m** valley (small — travel must be cheap; farm↔square under ~15 s). Gentle walkable fBm heightmap; mountain ridge north; a river always; ~40% of seeds coastal south (beach, dock, ocean fish + shells). **Every seed has "the shore":** beach on coastal seeds, a river bend with swimming hole + fishing dock + bench inland. Same staging anchor.
+2. **Zones as composition:** Farm, Town, Forest, Ridge trail + marker + overlook, Riverside/Shore. Seamless world, but every set is dressed for the fixed lens: fronts/signs/doors/festival staging face camera-south; sparse props; readable path approaches.
+3. **The farm:** ~30×24 tile field around farmhouse + shipping bin + well + mailbox; year-0 scatter of weeds/rocks/stumps plus tool-gated boulders/logs; a cleared 6×6 starter patch by the porch. Field size never grows; clearing it is progression.
+4. **The town:** main street + gazebo square, seeded layout, constant businesses: **Bramm's General**, **Hetta's Forge & Supply**, Corwin's carpentry yard, the clinic, the **Bluebird Tavern**, Greta's ranch gate, homes. Procedural signage with constant names.
+5. **Nature fill (sparse):** choppable regrowing trees, seasonal forage points, river/ocean fishing edges with per-zone tables.
+6. **Names:** town from syllable banks with earthy suffixes (-mere, -ford, -holt, -wyck); title screen reads "Welcome to {Town}."
+7. **The ridge marker:** an old stone trail marker with a flat offering ledge on the ridge path (§17).
+## 7. The grid & farming
+- **Tiles (1×1 m):** `wild(weed|rock|stump|boulder|log)` → `cleared` → `tilled` → `planted{crop, stage}` + `watered` flag; placeables (paths, fences, sprinklers) occupy tiles. Visuals: 0.96×0.96 planes over the ground at the staggered y-offset ladder, texture-swapped by state; watered soil is a darker texture, not a tint; crops are per-stage mesh/billboard swaps, instanced.
+- **Tools:** hoe, watering can, axe, hammer, sickle (+ fishing rod). Tiers copper/iron/gold at Hetta's: cost + 1–2 day turnaround (you lose the tool — plan around rain), each tier cuts stamina cost and widens AoE (3-in-a-row, then 3×3 for can/hoe).
+- **Crops:** ~18 across spring/summer/autumn (winter cropless by design — it's the town-and-finance season). Growth **1–3 days**, regrowth crops produce daily–every-2-days. Per-season gimmick: spring strawberry, summer sunflower (seeds back on harvest), autumn fair-pumpkin (size roll weighted by watering streak; a full-season commitment). Tier pricing: gold/day/tile roughly doubles up tiers but costs more up front. No quality tiers anywhere.
+- **Foraging:** seasonal spawn tables per zone; stamina-free income and the early gift source.
+- **Fishing:** cast → bob (1–8 s, `live` stream) → one timing-bar minigame (moving cursor, hit zone; width = rarity), chunky cream UI at display resolution. ~14 fish by zone × season, a few rain-only.
+- **Animals (phase 4, scope-gated):** chickens (coop; daily eggs if fed/petted — they feed Maren's contract), 1–2 cows (barn, year 2+). Bought from Greta. No breeding.
+- **Shipping:** bin pays at rollover with an itemized receipt; direct shop sales same price, instant.
+## 8. Economy, cashflow lag & the Ledger
+- **Cashflow lag (the tutorialized pain):** businesses not on the network pay by **mailed check** — income credits 2 days later ("Checks in the mail: $34, arrives Thu"). Seeds cost cash today. Networked businesses settle **instantly at rollover**. Never punishing (no debt); friction whose disappearance is the reward. The squeeze must bite in year 1 (§14, day 4).
+- **The Ledger** (arrives via the arc): a ledger-green book in the menu. Every dollar auto-tagged by enterprise (per-crop, Eggs, Fishing, Foraging, Odd Jobs, Supplies, Upgrades). Seasonal one-page reports (income by enterprise, best day, biggest cost). **Player power:** once the Ledger exists, the seed shop shows last season's per-crop profit chips next to packets. **Forecast strip** (arc stage 3): projected 6-day income from regrowth/animals/outstanding invoices. **Invoices:** villager requests become invoiced odd jobs — complete work, send invoice, watch it clear (instant if networked, mail-lag if not).
+- **Sinks:** seeds; tool tiers; backpack 12→24→36; farmhouse **kitchen** (2-ingredient stamina recipes learned from villagers) then **porch** (stages evening vignettes); coop→barn; iron-tier sprinklers (year 2 spring — watering stays real through year 1); odd-job toolkit; festival/social spend. Constant prices; the player's time is the fluctuating commodity.
+- **Grants board** (corkboard at the Bluebird, mirroring Ambrook's funding library): small player grants (riverbank planting $300, coop grant) each requiring one full season of Ledger history in the relevant enterprise; Greta's big barn grant triggers arc stage 4.
+## 9. The cast (12 authored constants; homes/shops placed by seed)
+| Villager | Role | Traits | Arc / notes |
+|---|---|---|---|
+| **Bramm** | Bramm's General | gruff, sweet-tooth | Every Restday, the back-room books — until the network frees him. Half of §12. Store window later stocks *your* goods (contract). |
+| **Hetta** | Smith | bold, wry | Tool upgrades; connects estimates→invoices in the arc and visibly reinvests (new awning/sign/forge hood). Focus villager. |
+| **Corwin** | Carpenter | outdoorsy, cheerful | Builds your upgrades; the contractor link in the payment chain. Focus. |
+| **Isolde** | Doctor | bookish, shy | Steadiness arc; narrates your hidden exhaustion. Focus. |
+| **Rolf** | Rival farmer | bold, gruff | **The holdout who converts.** Shoebox receipts visible through his window; Fair rival; last to join (stage 5), then gets his evenings back. Focus. |
+| **Maren** | Bluebird Tavern | cheerful, bold | Town's living room; runs the jukebox room; egg contract. Walks you in on day 1. Focus. |
+| **Greta** | Rancher | early-riser, sweet-tooth | The credit story: clean books → barn grant → sells you animals. Focus. |
+| **Aldwin** | Retired county extension agent | pious, wry | **Brings Ambrook to the valley** (the flyer). One line about the fox, after. |
+| **Old Ness** | Angler | gruff, outdoorsy | **The holdout who doesn't convert** — declines with full dignity ("My books balance every night, Aldwin"), zero penalty ever. Keeps the game honest. |
+| **Fen** | Ridge-trail caretaker | pious, shy | Tends the marker; never explains the ledge. |
+| **Pip** | Kid | cheerful, outdoorsy | Forage intel for berries; hireable weekend farmhand late (auto-paid via Ledger — a soft team-cards echo). |
+| **Sable** | Wanderer | wry, bookish | Weekdays wander; **every Restday, the shore bench.** The other half of §12. |
+- **Schedules:** authored timed-waypoint skeletons perturbed by weather/season/festivals/arc-stage; positions interpolate — never teleport; following someone home always works. Waypoint coordinates resolve against the seed's placements.
+- **Dialogue:** authored line banks with slots for season/weather/heart-tier/recent flags; distinct verbal tic per villager. Target ~60–100 lines each, focus villagers more.
+- **Hearts 0–10 for all twelve.** Gifts: one/day, loved/liked/disliked authored but **trait-consistent** (learnable by reasoning: sweet-tooth → pie/honey; pious → spring flowers, dislikes wine). Birthdays: the 6 focus villagers only, 2 per season, gift ×5, calendar-marked once met. Heart 7+ gated by vignettes + (where applicable) an active contract in good standing.
+- **Friendship vignettes:** authored two-choice scenes at 3/6/9 hearts for the six focus villagers; single 5-heart scenes for the rest. Rolf's 9 is the rivalry truce (gated on stage 5).
+## 10. Customer contracts (the endgame of friendship)
+At **6 hearts + they've received the relevant good a few times + (network contracts) their business is connected**, a villager *asks you* in an authored proposal scene: a standing order — quantity of a good **each Restday at +15%**, auto-fulfilled from shipped/stored goods and auto-invoiced (instant if networked; **Old Ness pays cash in person, Restdays, always**). Miss two Restdays running → contract pauses with a gentle scene (no heart spiral); resume by delivering in person. Slate: Maren eggs · Bramm a rotating window shelf of your produce/preserves (your goods visibly appear in his store) · Isolde herbs · Greta feed corn · Hetta charcoal · Old Ness bait worms · Corwin milled lumber (late). 2–3 concurrent is comfortable; 4 is a busy happy farm. The year-review prints "**Your customers:**" with portraits.
+## 11. The network arc (the spine)
+Witnessed on foot, never a menu abstraction. Ledger-green counter glyphs mark connected shops; each connection chimes.
+- **Stage 0 — Before** (Y1 autumn): mail-lag everywhere; Rolf's shoebox through the window; Bramm's Restday books; Sable's empty bench.
+- **Stage 1 — The flyer** (Y1 winter, day 4–5): Aldwin at the fence; the Ledger arrives by mail (the lag, one last time, as a joke); tags begin; mini-reveal (your forage money beat your turnips).
+- **Stage 2 — Bramm** (Y1 winter, day 5): the receipt-box quest + the sitting-with-him hour (a real heart scene) → Bramm's General settles instantly, demonstrated at his counter that same scene. His Restdays free up → §12 begins.
+- **Stage 3 — The shops** (Y2 spring): Hetta (estimates→invoices, visible reinvestment), then Maren (tabs). Forecast strip unlocks.
+- **Stage 4 — The chain** (Y2 summer): **watch one payment move through town** — Greta's barn grant clears → she pays Corwin's invoice → Corwin pays Hetta's → Hetta's order lands at Bramm's: four instant settlements in one walkable morning, counter to counter, each chiming. Journal: "Greta's barn money went through four hands before lunch, and nobody chased anybody."
+- **Stage 5 — Rolf** (Y2 winter): after his witnessed shoebox misery and tavern absences, Rolf shows up at your fence, pride intact, asking how the tags work. Evenings return; Bluebird stool reclaimed. Arc closes ≈ **80 minutes of play**.
+## 12. Bramm & Sable (the only romance — NPC-NPC, witnessed)
+Before: Bramm's Restdays 13:00–18:00 = back room, receipt piles, adding-machine *ka-chunk*; Sable's Restdays = the shore bench, alone. Two schedules that never intersect; the Journal drops one quiet hint. After stage 2: his books take an hour, and at 14:00 **his waypoints now include the bench**. No stage-managed meeting — the sprites find each other; if the player is present a short authored vignette plays (gruff meets wry), else the Journal reports the rumor. Progression advances one step per shared Restday: bench apart → shared bench → thermos with two cups → the shore path together → then **weeknight evenings both at the Bluebird**, separate tables, then the same one. Payoff at Starlight Eve Y2: the gift-exchange draw "happens" to pair them; paired schedules thereafter; Bramm stocks a book or two, "for a friend." The thesis is never stated in-game: the network gave him back his Restdays, and *he* chose what they were for.
+## 13. Calendar, festivals, mail, marker, Journal
+- **Festivals** (one per season, mid-season day 2, square/gazebo; time frozen; day ends after): **Seed Swap** (spring), **Firefly Night** (summer, lantern release on the water), **County Fair** (autumn — pumpkin judging vs. Rolf + 2 seeded rivals, fishing contest on coastal seeds), **Starlight Eve** (winter — seeded gift-exchange draw, snow-lit gazebo, year-review the next morning).
+- **Mail** (mailbox at the gate): checks, the flyer/Ledger, invoices, grant letters, tutorial nudges (the smith advertises when you can almost afford an upgrade), thank-yous, one-active-per-villager requests.
+- **The ridge marker & the fox:** leave any crop/forage/fish on the ledge → small `calendar`-drawn blessings next rollover (rain tomorrow, doubled forage, an instant bite) — never announced; the Journal merely notices. Rare dusk/dawn **white fox** sightings at the treeline (baked sprite), silently counted. Payoff at high town-wide hearts + a season of steady offerings: one scripted dawn, the fox leads you to the ridge overlook (the game's one authored 90° camera-snap spot), a wordless scene, a permanent stamina charm, and Aldwin's single line. That's all the myth there is.
+- **The Journal** (`J`): first-person daily entries auto-written at rollover from event flags via template grammar — firsts, income line, weather, festivals, vignettes, storms/losses, fox sightings, birthdays kept or missed, every arc and Bramm-&-Sable beat. Season headers. Voice: plain, warm, a little wry. **Export** full journal as .txt.
+- **The year-review** (after Starlight): a one-page annual report rendered to canvas, PNG-exportable — Ledger summary, Journal highlights, "Your customers" portrait strip — in the ledger-green frame with a small Ambrook mark + seed link. This is the shareable, and it lands at minute ~20 of a first session.
+## 14. Year 1 — the authored prologue (6 days, ~21 min)
+Guided: each day has one headline beat with ~25% slack; no failure states; stamina can't drop below Tired; the smart button's context always has one obviously-right target. Free play (extra planting, gifting, one cast of the rod) allowed, never required.
+| Day | Season | Beat |
+|---|---|---|
+| 1 | Autumn 1 | Arrival: Maren walks you square→gate, naming shops (worldgen tour as tutorial). Clear the starter patch, plant free 2-day turnips, sleep. |
+| 2 | Autumn 2 | **County Fair** — meet the whole cast in one square; Rolf's pumpkin wins; "next year," he says, in a tone. Water on the way. |
+| 3 | Autumn 3 · Restday | Harvest + ship turnips → "check in the mail, arrives in 2 days." Shops-shut lesson. Glimpses: Bramm's lit back-room window; Sable alone at the shore. |
+| 4 | Winter 1 | **The squeeze:** you want winter gear/a tool at Bramm's; the check is pending; you can't. Aldwin at the fence with the flyer. The check arrives at day's end — one beat too late, on purpose. |
+| 5 | Winter 2 | **The Ledger arrives** by mail (the lag's last joke). Tags begin; mini-reveal (forage beat turnips). Bramm quest: receipt box + the sitting hour → **Bramm connects**; buy the thing you couldn't, with today's money. |
+| 6 | Winter 3 · Restday + **Starlight Eve** | Morning: Bramm walks to the shore — the first meeting, witnessed or rumored. Evening: Starlight, the gift draw. Next morning: year review + export offer. Title card: **Year 2** — your first spring, the longest days you've had, a cleared field, seeds bought with same-day money. |
+## 15. Audio (all WebAudio-synthesized, GM-flavored; no samples)
+- **Overworld:** one gentle loop per season (warm synth strings, marimba, whistle/ocarina lead).
+- **The Bluebird jukebox:** 4–6 **original instrumentals in the style of 90s country arranged like Nintendo MIDI** — twangy square/saw lead on the "vocal" line, pitch-bend pedal-steel pads, walking bass, train-beat brushes, honky-tonk piano choruses. Titles on the jukebox: "Gravel Road Home," "Two-Step Tuesday," "Neon Bluebird," "Checks in the Mail" (retires from rotation after stage 3 — a joke for whoever notices). Strictly original; leaks low-pass-filtered through the tavern door at night, opens full inside.
+- **SFX (soft, rounded):** hoe thud, water plink, text blip, mailbox creak, jukebox coin, adding-machine ka-chunk (before), counter-glyph chime (after).
+## 16. UI & menus
+Cream text boxes (`#F2E8CE` fill, thick rounded `#7A5C3E` border, bottom third; character-by-character reveal + blip; portrait left). Text renders at display resolution (crisp text over pixel world = "remastered"), rounded pixel-adjacent font at integer scale, `#3E3226`. HUD: date/season/weather plaque top-left + held item bottom-right, nothing else; `H` hides all. Tab menu: Inventory · Villagers (portrait wall, heart pips, contract badges, learned birthdays/loves filled by discovery) · Ledger · Journal · Map (zone diagram + shop hours) · Save/Load · Settings (volume, colorblind watered-tile pattern, touch sizes). Transitions fade-to-cream. New game: seed field / "surprise me" → 3 character pickers (baked into the player sprite) → farm name → day 1.
+## 17. Data model sketch
+```
+CONFIG    // every tuning constant
+CAST      // authored: 12 × {name, role, traits, birthday?, giftPrefs, scheduleSkeleton,
+          //   lineBank, vignettes, contractDef?, modelRecipe, portraitRecipe}
+World     { seed, terrain, zones, townName, placements, forageSpots, fishEdges, markerPos, calendar[] }
+Player    { name, look, pos, dollars, stamina(hidden), maxStamina, inventory, heldItem,
+            toolTiers, upgrades, hearts{}, metFlags, learnedFlags }
+Tile      { state, crop?, stage, watered, object? }        // flat array
+Ledger    { entries[{day,$,enterprise,counterpart,settled|pending}], reports[], invoices[], forecast }
+Network   { stage, connected{castId}, vignetteFlags }
+Romance   { restdayCounter, scenesSeen[] }
+Contracts { castId → {good, qty, premium, status, streak} }
+Journal   { entries[{day, lines, flags}] }
+DayState  { dayIndex, weather, forecast, festival?, mail[], scheduleCache }
+Save      = JSON{dayIndex, Player, Tile deltas, hearts, Ledger, Network, Romance,
+            Contracts, journal flags, shrine counters} → Base64 → clipboard / .almanac
+SpriteBank{ castId → atlas }   // baked at boot, never saved
+```
+## 18. Non-goals (do not build)
+No combat/mines/dungeons; no crop quality tiers; no NPC-vs-NPC simulation beyond the authored arcs; no animal breeding; no multiplayer; no market price simulation; no free camera or player zoom; no dynamic lighting; no interiors beyond single rooms (separate mini-scenes behind a cream fade, time paused inside); no real-money/signup/data anything; no covers of real songs; no contract micromanagement UI; no per-seed villagers.
+## 19. Build phases (each ships a runnable single file; self-check acceptance, then continue)
+| Phase | Scope | Self-check acceptance |
+|---|---|---|
+| **1 — The Farm & The Year** | Worldgen, camera rig, character controller + baked player sprite, tile/tool/crop loop, seasonal-daylight clock + rollover, checks-in-mail lag, bin, sleep, save codes, seed URL, HUD, **the full 6-day year-1 beat sheet with placeholder dialogue** | Year 1 playable end-to-end ≤25 min at 60fps; the squeeze lands day 4; two seeds are visibly different valleys with the same shops |
+| **2 — The Town** | All 12 chibis + bake pipeline + portraits, dialogue system + line banks, schedules + interpolation, shops/hours/buy-sell, gifts + hearts, mail, Ledger v1 (tags + reports + profit chips), invoiced jobs, Journal v1, menus/map | Follow Bramm through a full day; reason out a loved gift from traits and watch hearts move; the year-1 script runs with real scenes |
+| **3 — The Years** | Full crop/fish/forage tables, weather suite + festivals ×4, vignettes, arc stages 3–4 (Hetta, Maren, forecast, the chain), contracts system + slate, upgrades, kitchen/porch, jukebox v1 | Year 2 completes in ~55 min feeling like a farm year; a 6-heart proposal scene reads as an honor; the chain is walkable in one morning |
+| **4 — The Life** | Stage 5 (Rolf), Bramm & Sable full progression + Starlight payoff, Old Ness holdout scene, grants board + Greta's barn, animals (scope gate), fox marker + payoff, year-review PNG export, full jukebox + audio pass, polish/perf | Full arc closes ≈80 min; the export renders correctly; brand test passes (§20) |
+## 20. Acceptance
+**The one-sitting test:** a first-time player finishes year 1 in one sitting (~20–25 min) and starts year 2 unprompted. **The brand test:** afterwards, "what is this game?" gets an answer about the farm, the town, or a person — never a product; "what changed in the town?" gets the network story in their own words (Bramm's Restdays, Rolf's shoebox, the morning the barn money moved through four hands). **The honesty check:** Old Ness's refusal costs the player nothing, ever.
+If the one-sitting test passes, the town feels like home. Everything above serves that sentence.

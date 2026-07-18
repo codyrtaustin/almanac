@@ -1,0 +1,3382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>ALMANAC</title>
+<!--
+  ALMANAC — Phase 1: The Farm & The Year
+  Built against SPEC.md v1.0. Single file, Three.js r128, no storage APIs.
+
+  DESIGN DECISIONS (unspecified in spec, chosen per pillars):
+  - Player character uses a live 3D chibi (spec §3 sanctioned fallback) instead of a
+    baked sprite atlas; the bake pipeline lands in phase 2 alongside the 12 villagers.
+  - Gameplay plane is flat (y=0); the "gentle fBm heightmap" is expressed visually via
+    the painted ground canvas + ridge scenery, keeping the character controller and
+    tile targeting simple. Walkable height variation deferred.
+  - Ground outside the farm field is one painted canvas texture (2px/m) rather than
+    tiles; the farm field itself is the tile grid with InstancedMesh overlays.
+  - Interiors are stubbed in phase 1: the farmhouse door prompts sleep, shop doors
+    open the shop panel behind a cream fade. Walkable single-room interiors in ph.2.
+  - Weather set for phase 1: sun / cloud / rain (autumn), sun / snow (winter).
+  - Fishing is deferred to phase 3 (not in phase-1 goal); foraging is included since
+    day-5's mini-reveal references forage income.
+  - Free turnip packet covers the 6x6 starter patch (36 seeds). Turnip check $216;
+    the winter coat is $75 and starting cash $40 so the day-4 squeeze always bites.
+  - NPC schedules in phase 1 are per-day scripted placements serving the Year-1
+    beats; full waypoint schedule skeletons arrive in phase 2.
+  - Debug hooks exposed on window.ALMANAC for acceptance testing (harmless in play).
+-->
+<style>
+  :root {
+    --cream:#F2E8CE; --border:#7A5C3E; --ink:#3E3226; --green:#4E7A5A;
+    --wood:#A97B55; --path:#B99A6B;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body { width:100%; height:100%; overflow:hidden; background:#2A241B;
+    font-family:'Trebuchet MS','Verdana',sans-serif; touch-action:none;
+    -webkit-user-select:none; user-select:none; }
+  #app { position:fixed; inset:0; }
+  #stage { position:absolute; overflow:hidden; background:#BFDCE8; }
+  #c { position:absolute; left:0; top:0; width:100%; height:100%;
+    image-rendering:pixelated; image-rendering:crisp-edges; display:block; }
+  .grade { position:absolute; inset:0; pointer-events:none;
+    transition:background-color 1.2s linear, opacity 1.2s linear; }
+  #gradeSoft { mix-blend-mode:soft-light; background:#E8A87C; opacity:0; }
+  #gradeMult { mix-blend-mode:multiply; background:#e0c0b0; opacity:0; }
+  #ui { position:absolute; overflow:hidden; pointer-events:none; color:var(--ink); }
+  #ui > * { pointer-events:auto; }
+
+  /* HUD */
+  #hud { position:absolute; left:10px; top:10px; pointer-events:none; }
+  .plaque { background:var(--cream); border:3px solid var(--border); border-radius:10px;
+    padding:6px 12px; font-weight:bold; line-height:1.25; box-shadow:0 2px 0 rgba(62,50,38,.25);
+    font-size:14px; }
+  #hudDate { font-size:15px; }
+  #hudTime { font-size:13px; opacity:.85; }
+  #hudMoney { color:#5a4a2e; font-size:14px; }
+  #objective { position:absolute; left:50%; top:10px; transform:translateX(-50%);
+    background:rgba(242,232,206,.92); border:2px solid var(--border); border-radius:8px;
+    padding:3px 12px; font-size:12.5px; font-weight:bold; pointer-events:none;
+    white-space:nowrap; }
+  #held { position:absolute; right:12px; bottom:12px; width:64px; height:64px;
+    background:var(--cream); border:3px solid var(--border); border-radius:12px;
+    display:flex; align-items:center; justify-content:center; flex-direction:column;
+    pointer-events:none; }
+  #heldIcon { font-size:26px; line-height:1; }
+  #heldName { font-size:9px; font-weight:bold; max-width:60px; text-align:center;
+    overflow:hidden; }
+  #heldCount { position:absolute; right:4px; bottom:2px; font-size:11px; font-weight:bold; }
+  #toast { position:absolute; left:50%; bottom:118px; transform:translateX(-50%);
+    background:rgba(242,232,206,.95); border:2px solid var(--border); border-radius:8px;
+    padding:5px 14px; font-size:13px; font-weight:bold; opacity:0;
+    transition:opacity .35s; pointer-events:none; white-space:nowrap; }
+
+  /* Dialogue */
+  #dlg { position:absolute; left:50%; bottom:14px; transform:translateX(-50%);
+    width:86%; max-width:760px; background:var(--cream); border:4px solid var(--border);
+    border-radius:14px; padding:12px 16px 14px; display:none; min-height:92px; }
+  #dlgName { font-weight:bold; font-size:13px; color:#6b4a2e; margin-bottom:3px; }
+  #dlgText { font-size:16px; line-height:1.45; min-height:46px; }
+  #dlgMore { position:absolute; right:14px; bottom:6px; font-size:14px;
+    animation:bob 1s ease-in-out infinite; }
+  #dlgPortrait { position:absolute; left:-10px; top:-74px; width:84px; height:84px;
+    border:4px solid var(--border); border-radius:12px; background:var(--cream);
+    display:none; image-rendering:pixelated; }
+  @keyframes bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(4px)} }
+  #choices { position:absolute; right:20px; bottom:120px; display:none;
+    flex-direction:column; gap:6px; }
+  .choiceBtn { background:var(--cream); border:3px solid var(--border); border-radius:10px;
+    padding:7px 18px; font-size:15px; font-weight:bold; color:var(--ink); cursor:pointer;
+    font-family:inherit; text-align:left; }
+  .choiceBtn.sel { background:#e6d8b4; border-color:#5d452e; }
+
+  /* Panels (menu, shop, title) */
+  .panel { position:absolute; left:50%; top:50%; transform:translate(-50%,-50%);
+    background:var(--cream); border:4px solid var(--border); border-radius:16px;
+    padding:16px 20px; display:none; max-height:88%; overflow:auto; }
+  #menu { width:82%; max-width:720px; height:80%; }
+  .tabRow { display:flex; gap:6px; margin-bottom:12px; flex-wrap:wrap; }
+  .tabBtn { background:#E4D6B4; border:2px solid var(--border); border-radius:8px 8px 0 0;
+    padding:5px 12px; font-weight:bold; font-size:13px; cursor:pointer; color:var(--ink);
+    font-family:inherit; }
+  .tabBtn.on { background:var(--cream); border-bottom-color:var(--cream); }
+  .tabBtn.ledger { color:var(--green); }
+  #tabBody { font-size:14px; line-height:1.5; }
+  .invGrid { display:grid; grid-template-columns:repeat(auto-fill,64px); gap:8px; }
+  .invCell { width:64px; height:64px; background:#EADCBC; border:2px solid var(--border);
+    border-radius:10px; display:flex; flex-direction:column; align-items:center;
+    justify-content:center; cursor:pointer; position:relative; }
+  .invCell.sel { outline:3px solid var(--green); }
+  .invIcon { font-size:24px; } .invName { font-size:8px; font-weight:bold; text-align:center; }
+  .invCt { position:absolute; right:3px; bottom:1px; font-size:10px; font-weight:bold; }
+  button.uiBtn { background:#E4D6B4; border:3px solid var(--border); border-radius:10px;
+    padding:6px 16px; font-weight:bold; font-size:14px; cursor:pointer; color:var(--ink);
+    font-family:inherit; margin:4px 4px 4px 0; }
+  button.uiBtn:active { transform:translateY(1px); }
+  textarea.saveBox { width:100%; height:70px; font-size:11px; border:2px solid var(--border);
+    border-radius:8px; background:#fff8e8; color:var(--ink); padding:6px; resize:none; }
+  .shopRow { display:flex; align-items:center; gap:10px; padding:6px 4px;
+    border-bottom:1px dashed #c9b68d; cursor:pointer; border-radius:6px; }
+  .shopRow.sel { background:#e8dab6; }
+  .shopIcon { font-size:22px; width:30px; text-align:center; }
+  .shopName { flex:1; font-weight:bold; font-size:15px; }
+  .shopPrice { font-weight:bold; font-size:15px; color:#5a4a2e; }
+  .shopPrice.cant { color:#a55; }
+
+  /* Radial ring */
+  #radial { position:absolute; display:none; pointer-events:none; }
+  .radItem { position:absolute; width:52px; height:52px; margin:-26px 0 0 -26px;
+    background:rgba(242,232,206,.94); border:3px solid var(--border); border-radius:50%;
+    display:flex; align-items:center; justify-content:center; flex-direction:column;
+    font-size:20px; }
+  .radItem.sel { background:#fff3d4; border-color:var(--green); transform:scale(1.18); }
+  .radLbl { font-size:7px; font-weight:bold; }
+
+  /* Title */
+  #title { display:none; position:absolute; inset:0; background:#BFDCE8;
+    align-items:center; justify-content:center; flex-direction:column; text-align:center; }
+  #titleCard { background:var(--cream); border:4px solid var(--border); border-radius:18px;
+    padding:26px 40px; max-width:520px; width:88%; }
+  #titleLogo { font-size:44px; font-weight:bold; letter-spacing:10px; color:var(--ink);
+    text-shadow:2px 2px 0 #d8c8a2; margin-bottom:2px; }
+  #titleSub { font-size:13px; color:#6b5a40; margin-bottom:16px; }
+  #titleWelcome { font-size:16px; font-weight:bold; color:var(--green); margin-bottom:14px;
+    min-height:20px; }
+  .titleField { margin:8px 0; }
+  .titleField input { font-size:16px; padding:6px 10px; border:3px solid var(--border);
+    border-radius:8px; background:#fff8e8; color:var(--ink); width:200px; text-align:center;
+    font-family:inherit; }
+  .picker { display:flex; align-items:center; justify-content:center; gap:8px; margin:6px 0; }
+  .picker b { width:64px; font-size:13px; text-align:right; }
+  .swatch { width:26px; height:26px; border-radius:6px; border:2px solid var(--border);
+    cursor:pointer; }
+  .swatch.sel { outline:3px solid var(--green); }
+  #ambrookMark { margin-top:16px; font-size:11px; color:#6b5a40; }
+  #ambrookMark a { color:var(--green); font-weight:bold; text-decoration:none; }
+
+  /* Fade + year review */
+  #fade { position:absolute; inset:0; background:var(--cream); opacity:0;
+    pointer-events:none; transition:opacity .6s; z-index:60; }
+  #yearCard { z-index:70; text-align:center; max-width:560px; width:88%;
+    border-color:var(--green); }
+  #yearCard h2 { color:var(--green); margin-bottom:8px; }
+  #yearBody { text-align:left; font-size:14px; line-height:1.6; margin:10px 0; }
+
+  /* Touch controls */
+  #touch { display:none; }
+  @media (pointer:coarse) { #touch { display:block; } }
+  #joyBase { position:absolute; left:26px; bottom:26px; width:110px; height:110px;
+    border-radius:50%; background:rgba(242,232,206,.35); border:3px solid rgba(122,92,62,.6); }
+  #joyKnob { position:absolute; left:32px; top:32px; width:46px; height:46px;
+    border-radius:50%; background:rgba(242,232,206,.8); border:3px solid var(--border); }
+  #actBtn { position:absolute; right:26px; bottom:96px; width:84px; height:84px;
+    border-radius:50%; background:rgba(242,232,206,.75); border:4px solid var(--border);
+    display:flex; align-items:center; justify-content:center; font-size:26px;
+    font-weight:bold; color:var(--ink); }
+  #menuBtn { position:absolute; right:34px; top:12px; width:52px; height:34px;
+    border-radius:10px; background:rgba(242,232,206,.75); border:3px solid var(--border);
+    display:flex; align-items:center; justify-content:center; font-size:13px;
+    font-weight:bold; color:var(--ink); }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="stage">
+    <canvas id="c" width="640" height="360"></canvas>
+    <div class="grade" id="gradeSoft"></div>
+    <div class="grade" id="gradeMult"></div>
+  </div>
+  <div id="ui">
+    <div id="hud">
+      <div class="plaque">
+        <div id="hudDate">Autumn, Day 1</div>
+        <div id="hudTime">6:00 · Clear</div>
+        <div id="hudMoney">$40</div>
+      </div>
+    </div>
+    <div id="objective"></div>
+    <div id="held"><div id="heldIcon"></div><div id="heldName"></div><div id="heldCount"></div></div>
+    <div id="toast"></div>
+    <div id="dlg">
+      <canvas id="dlgPortrait" width="84" height="84"></canvas>
+      <div id="dlgName"></div><div id="dlgText"></div><div id="dlgMore">▾</div>
+    </div>
+    <div id="choices"></div>
+    <div id="radial"></div>
+    <div class="panel" id="menu">
+      <div class="tabRow" id="tabRow"></div>
+      <div id="tabBody"></div>
+    </div>
+    <div class="panel" id="shop"></div>
+    <div class="panel" id="yearCard"></div>
+    <div id="title">
+      <div id="titleCard">
+        <div id="titleLogo">ALMANAC</div>
+        <div id="titleSub">a season in the valley</div>
+        <div id="titleWelcome"></div>
+        <div id="titleBody"></div>
+        <div id="ambrookMark">made in partnership with
+          <a href="https://ambrook.com" target="_blank" rel="noopener">Ambrook</a></div>
+      </div>
+    </div>
+    <div id="touch">
+      <div id="joyBase"><div id="joyKnob"></div></div>
+      <div id="actBtn">E</div>
+      <div id="menuBtn">MENU</div>
+    </div>
+    <div id="fade"></div>
+  </div>
+</div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+'use strict';
+/* ============================== CONFIG =================================== */
+const CONFIG = {
+  WORLD_W: 240, WORLD_H: 180,            // metres; x in [-120,120], z in [-90,90]
+  VIEW_W: 640, VIEW_H: 360,
+  CAM_OFFSET: { x: 0, y: 14, z: 12 },
+  CAM_LERP: 0.06, CAM_DEADZONE: 0.6,
+  ZONE_HEIGHT: { farm: 15, town: 13, wild: 14, interior: 11 },
+  ZONE_EASE: 0.02,
+
+  DAY_START: 6, DAY_END: 24,
+  SEASONS: ['Spring', 'Summer', 'Autumn', 'Winter'],
+  SEASON_DAYS: 3, YEAR_DAYS: 12,
+  DAY_MINUTES: { Spring: 5.5, Summer: 6, Autumn: 4, Winter: 3 },
+  DUSK_HOUR: { Spring: 19, Summer: 21, Autumn: 18, Winter: 17 },
+  NIGHT_HOUR: { Spring: 21, Summer: 22.5, Autumn: 20, Winter: 19 },
+  START_DAY: 6,                          // absolute day index: Y1 Autumn 1
+  SLEEP_FROM: 18,
+
+  START_MONEY: 40,
+  CHECK_LAG_DAYS: 2,
+  COAT_PRICE: 120,   // must exceed any plausible day-9 cash so the squeeze bites
+
+  STAMINA_MAX: 100,
+  STAMINA_COST: { hoe: 3, axe: 4, hammer: 4, sickle: 2, can: 1 },
+  STAMINA_Y1_FLOOR: 40,                  // year 1 can't drop below "Tired"
+  SLUMP_AT: 50, SWEAT_AT: 25, STUMBLE_AT: 10,
+
+  FIELD_W: 30, FIELD_H: 24,              // farm tile grid
+  STARTER: 6,                            // cleared starter patch size
+
+  PLAYER_SPEED: 5.2,
+  NPC_SPEED: 3.2,
+  INTERACT_DIST: 1.9,
+  HOLD_MS: 340,                          // hold-E opens radial
+
+  CROPS: {
+    turnip:    { name: 'Turnip',     icon: '🥕', seasons: ['Autumn', 'Spring'], days: 2, seed: 20, sell: 6,  color: 0xE8E4EC, packet: 6 },
+    carrot:    { name: 'Carrot',     icon: '🥕', seasons: ['Autumn'],           days: 3, seed: 25, sell: 11, color: 0xD98A4B, packet: 6 },
+    bokchoy:   { name: 'Bok Choy',   icon: '🥬', seasons: ['Autumn'],           days: 2, seed: 22, sell: 8,  color: 0x9CBF8A, packet: 6 },
+    potato:    { name: 'Potato',     icon: '🥔', seasons: ['Spring'],           days: 3, seed: 24, sell: 12, color: 0xC9A876, packet: 6 },
+    cucumber:  { name: 'Cucumber',   icon: '🥒', seasons: ['Spring'],           days: 2, seed: 22, sell: 8,  color: 0x6F9E5A, packet: 6 },
+    strawberry:{ name: 'Strawberry', icon: '🍓', seasons: ['Spring'],           days: 3, seed: 30, sell: 14, color: 0xC65B5B, packet: 6 }
+  },
+  FORAGE: {
+    Autumn: [ { id: 'mushroom', name: 'Mushroom',   icon: '🍄', sell: 7 },
+              { id: 'walnut',   name: 'Walnut',     icon: '🌰', sell: 5 },
+              { id: 'berries',  name: 'Wild Berries', icon: '🫐', sell: 6 } ],
+    Winter: [ { id: 'wintergreen', name: 'Wintergreen', icon: '🌿', sell: 10 },
+              { id: 'pinecone',    name: 'Pine Cone',   icon: '🌲', sell: 5 } ],
+    Spring: [ { id: 'daffodil', name: 'Daffodil',  icon: '🌼', sell: 8 },
+              { id: 'wildleek', name: 'Wild Leek', icon: '🧅', sell: 9 } ],
+    Summer: [ { id: 'honeycomb', name: 'Honeycomb', icon: '🍯', sell: 12 } ]
+  },
+  FORAGE_PER_DAY: 5,
+
+  PALETTE: {
+    grass: '#7FA86A', grassShade: '#5E8A55', grassWinter: '#A8B098',
+    grassWinterShade: '#8C9682',
+    tilled: '#8A6248', wateredSoil: '#6B4A3A', cleared: '#96865E',
+    path: '#B99A6B', wood: '#A97B55', roofRed: '#B3574C', roofTeal: '#5E8E8A',
+    stone: '#9C9C94', water: '#6FA3B8', sky: '#BFDCE8', skyNight: '#3A4260',
+    cream: '#F2E8CE', border: '#7A5C3E', ink: '#3E3226', green: '#4E7A5A',
+    sand: '#D8C494'
+  }
+};
+
+/* ================================ RNG ==================================== */
+// sfc32 + splitmix32 seeding. Three streams: gen (worldgen, consumed once),
+// calendar (per-day, index-addressed), live (moment-to-moment).
+function splitmix32(a) {
+  return function () {
+    a |= 0; a = a + 0x9e3779b9 | 0;
+    let t = a ^ a >>> 16; t = Math.imul(t, 0x21f0aaad);
+    t = t ^ t >>> 15; t = Math.imul(t, 0x735a2d97);
+    return ((t = t ^ t >>> 15) >>> 0) / 4294967296;
+  };
+}
+function sfc32(a, b, c, d) {
+  return function () {
+    a >>>= 0; b >>>= 0; c >>>= 0; d >>>= 0;
+    let t = (a + b) | 0;
+    a = b ^ b >>> 9; b = c + (c << 3) | 0; c = (c << 21 | c >>> 11);
+    d = d + 1 | 0; t = t + d | 0; c = c + t | 0;
+    return (t >>> 0) / 4294967296;
+  };
+}
+function makeStream(seed, key) {
+  const mix = splitmix32((seed ^ key) | 0);
+  const s = sfc32(mix() * 4294967296, mix() * 4294967296, mix() * 4294967296, mix() * 4294967296);
+  for (let i = 0; i < 12; i++) s();   // warm up
+  return s;
+}
+const RNG = { seed: 0, streams: {} };
+function seedRNG(seed) {
+  RNG.seed = seed >>> 0;
+  RNG.streams.gen = makeStream(RNG.seed, 0x67656E);
+  RNG.streams.live = makeStream(RNG.seed, 0x6C697665);
+}
+// The single gateway for all draws.
+function rand(stream) { return RNG.streams[stream](); }
+function randi(stream, lo, hi) { return lo + Math.floor(rand(stream) * (hi - lo + 1)); }
+// Calendar stream: a fresh generator per absolute day so loads never reshuffle.
+function calendarDay(dayIndex) {
+  const s = makeStream(RNG.seed, 0x63616C ^ Math.imul(dayIndex + 1, 0x9E37));
+  return { r: s };
+}
+
+/* ============================== HELPERS ================================== */
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const lerp = (a, b, t) => a + (b - a) * t;
+const dist2 = (ax, az, bx, bz) => { const dx = ax - bx, dz = az - bz; return dx * dx + dz * dz; };
+const $ = id => document.getElementById(id);
+function seasonOf(day) { return CONFIG.SEASONS[Math.floor(day / CONFIG.SEASON_DAYS) % 4]; }
+function dayOfSeason(day) { return day % CONFIG.SEASON_DAYS + 1; }
+function yearOf(day) { return Math.floor(day / CONFIG.YEAR_DAYS) + 1; }
+function isRestday(day) { return dayOfSeason(day) === 3; }
+function fmtHour(h) {
+  const hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+  return hh + ':' + String(mm).padStart(2, '0');
+}
+function b64encode(str) { return btoa(unescape(encodeURIComponent(str))); }
+function b64decode(str) { return decodeURIComponent(escape(atob(str))); }
+
+/* ============================ GAME STATE ================================= */
+const G = {
+  mode: 'boot',            // boot | title | play | scene | sleep
+  world: null,
+  day: CONFIG.START_DAY,
+  hour: CONFIG.DAY_START,
+  weather: 'sun',
+  money: CONFIG.START_MONEY,
+  stamina: CONFIG.STAMINA_MAX,
+  collapsedYesterday: false,
+  inventory: {},           // itemId -> count
+  heldItem: null,          // itemId or tool id
+  tools: ['hoe', 'can', 'axe', 'hammer', 'sickle'],
+  pendingChecks: [],       // {amount, arriveDay, label}
+  todayShipped: [],        // {id, name, count, value, enterprise}
+  mail: [],                // {day, from, title, body, read}
+  journal: [],             // {day, lines[]}
+  dayFlags: {},            // reset each rollover; feeds journal
+  flags: {},               // persistent story flags
+  ledger: { unlocked: false, entries: [] },  // {day, amount, enterprise, note}
+  network: { connected: {} },
+  farmName: 'Sundrop Farm',
+  playerName: 'You',
+  look: { skin: 0, hair: 0, shirt: 0 },
+  hearts: {},
+  paused: false,
+  uiOpen: null,            // 'menu' | 'shop' | 'dialogue' | 'radial' | 'year'
+  hideHUD: false,
+  autosave: null,
+  input: { x: 0, z: 0, act: false },
+  fps: { frames: 0, last: 0, value: 60 }
+};
+/* ============================== WORLDGEN ================================= */
+function genTownName() {
+  const starts = ['Bell', 'Har', 'Wil', 'Ash', 'Fern', 'Cop', 'Mar', 'Dun', 'Hazel', 'Bram', 'Stone', 'Alder'];
+  const mids = ['low', 'ren', 'der', 'ber', 'ing', 'ne', ''];
+  const ends = ['mere', 'ford', 'holt', 'wyck', 'dale', 'brook'];
+  return starts[randi('gen', 0, starts.length - 1)] +
+         mids[randi('gen', 0, mids.length - 1)] +
+         ends[randi('gen', 0, ends.length - 1)];
+}
+
+function generateWorld(seed) {
+  seedRNG(seed);
+  const W = { seed, colliders: [], circles: [] };
+  W.townName = genTownName();
+  W.coastal = rand('gen') < 0.4;
+
+  // ---- macro layout (gen stream, consumed in fixed order) ----
+  const pathZ = 4;
+  W.pathZ = pathZ;
+  W.riverX = -20 + rand('gen') * 22;                 // [-20, 2]
+  W.riverPhase = rand('gen') * Math.PI * 2;
+  const farmX = -76 + rand('gen') * 10;              // field centre x
+  const townX = 42 + rand('gen') * 14;
+  W.farm = { x: farmX };
+  W.town = { x: townX };
+  W.shoreX = W.riverX + (rand('gen') < 0.5 ? -1 : 1) * (14 + rand('gen') * 12);
+  W.trailX = townX - 26 + rand('gen') * 10;
+
+  // river polyline (north edge to the shore pool)
+  W.riverW = 6;
+  W.river = [];
+  for (let z = -90; z <= 38; z += 8) {
+    W.river.push({ x: W.riverX + Math.sin(z * 0.06 + W.riverPhase) * 3, z });
+  }
+  W.river.push({ x: lerp(W.riverX, W.shoreX, 0.5), z: 48 });
+  W.river.push({ x: W.shoreX, z: 58 });
+  W.pool = { x: W.shoreX, z: 66, r: 9 };
+  if (W.coastal) W.river.push({ x: W.shoreX, z: 76 });
+  W.oceanZ = 74;                                     // coastal seeds only
+
+  // ---- farm ----
+  const fx0 = Math.round(farmX) - 15, fz0 = -6;
+  W.field = { x0: fx0, z0: fz0, w: CONFIG.FIELD_W, h: CONFIG.FIELD_H };
+  W.house = { x: fx0 + 15, z: fz0 - 5.5, w: 9, d: 7 };
+  W.bin = { x: fx0 + 23, z: fz0 - 3.5 };
+  W.well = { x: fx0 + 7, z: fz0 - 3.5 };
+  W.mailbox = { x: fx0 + 30.5, z: pathZ - 2 };
+  W.gate = { x: fx0 + 30, z: pathZ };
+  W.farmRect = { x0: fx0 - 8, z0: fz0 - 12, x1: fx0 + 38, z1: fz0 + CONFIG.FIELD_H + 4 };
+
+  // ---- town: constant businesses, seeded order along the street ----
+  const shopDefs = [
+    { id: 'general', name: "Bramm's General",     roof: 'red',  w: 10, d: 8 },
+    { id: 'forge',   name: "Hetta's Forge & Supply", roof: 'teal', w: 9, d: 7 },
+    { id: 'carpenter', name: "Corwin's Carpentry", roof: 'red',  w: 9, d: 7 },
+    { id: 'clinic',  name: 'Clinic',               roof: 'teal', w: 8, d: 7 },
+    { id: 'tavern',  name: 'The Bluebird',         roof: 'red',  w: 11, d: 9 },
+    { id: 'home1',   name: '',                     roof: 'teal', w: 7, d: 6 },
+    { id: 'home2',   name: '',                     roof: 'red',  w: 7, d: 6 }
+  ];
+  // shuffle with gen stream (Fisher-Yates)
+  for (let i = shopDefs.length - 1; i > 0; i--) {
+    const j = randi('gen', 0, i);
+    [shopDefs[i], shopDefs[j]] = [shopDefs[j], shopDefs[i]];
+  }
+  W.shops = [];
+  let sx = townX - 36;
+  for (const def of shopDefs) {
+    W.shops.push(Object.assign({ x: sx + def.w / 2, z: -3.5 }, def));
+    sx += def.w + 4;
+  }
+  W.gazebo = { x: townX, z: 16 };
+  W.ranchGate = { x: townX + 42, z: pathZ };
+  W.townRect = { x0: townX - 42, z0: -14, x1: townX + 46, z1: 26 };
+
+  // ---- shore & ridge ----
+  W.bench = { x: W.pool.x + 6, z: W.pool.z - 7 };
+  W.dock = { x: W.pool.x - 2, z: W.pool.z - 5 };
+  W.marker = { x: W.trailX, z: -62 };
+  W.overlook = { x: W.trailX - 9, z: -70 };
+
+  // ---- paths (painted + kept clear of trees) ----
+  W.paths = [
+    { pts: [{ x: W.gate.x, z: pathZ }, { x: townX - 38, z: pathZ }, { x: townX + 40, z: pathZ }], w: 3 },
+    { pts: [{ x: townX, z: pathZ }, { x: townX, z: 16 }], w: 2.5 },                        // square
+    { pts: [{ x: townX - 6, z: pathZ }, { x: W.pool.x + 2, z: W.pool.z - 8 }], w: 2 },     // shore trail
+    { pts: [{ x: W.trailX + 4, z: pathZ }, { x: W.trailX, z: -30 }, { x: W.marker.x, z: W.marker.z + 3 }], w: 2 }, // ridge trail
+    { pts: [{ x: W.house.x, z: W.house.z + 4 }, { x: W.house.x, z: fz0 + 3 }], w: 1.5 }    // porch
+  ];
+
+  // ---- walkability mask (1 = blocked) ----
+  const MW = CONFIG.WORLD_W, MH = CONFIG.WORLD_H;
+  const mask = new Uint8Array(MW * MH);
+  const mi = (x, z) => (Math.floor(z) + 90) * MW + (Math.floor(x) + 120);
+  const block = (x, z) => { if (x >= -120 && x < 120 && z >= -90 && z < 90) mask[mi(x, z)] = 1; };
+  // world edges
+  for (let x = -120; x < 120; x++) for (let z = -90; z < 90; z++) {
+    if (x < -117 || x > 116 || z < -87 || z > 86) block(x, z);
+  }
+  // ridge face
+  for (let x = -120; x < 120; x++) for (let z = -90; z < -74; z++) block(x, z);
+  // river (skip bridge span)
+  W.bridge = { x: 0, z: pathZ, w: 8 };
+  for (let i = 0; i < W.river.length - 1; i++) {
+    const a = W.river[i], b = W.river[i + 1];
+    const steps = Math.ceil(Math.hypot(b.x - a.x, b.z - a.z));
+    for (let s = 0; s <= steps; s++) {
+      const x = lerp(a.x, b.x, s / steps), z = lerp(a.z, b.z, s / steps);
+      if (Math.abs(z - pathZ) < 2.6) { W.bridge.x = x; continue; }   // bridge crossing
+      for (let dx = -W.riverW / 2; dx <= W.riverW / 2; dx++) block(x + dx, z);
+    }
+  }
+  // pool
+  for (let x = -120; x < 120; x++) for (let z = -90; z < 90; z++) {
+    if (dist2(x + 0.5, z + 0.5, W.pool.x, W.pool.z) < W.pool.r * W.pool.r) block(x, z);
+  }
+  // ocean
+  if (W.coastal) {
+    for (let x = -120; x < 120; x++) for (let z = W.oceanZ; z < 90; z++) block(x, z);
+  }
+  W.mask = mask;
+  W.walkable = (x, z) => {
+    if (x < -120 || x >= 120 || z < -90 || z >= 90) return false;
+    return mask[mi(x, z)] === 0;
+  };
+
+  // ---- trees (rejection-sampled, sparse; avoid paths/zones/water) ----
+  const nearPath = (x, z) => {
+    for (const p of W.paths) {
+      for (let i = 0; i < p.pts.length - 1; i++) {
+        const a = p.pts[i], b = p.pts[i + 1];
+        const l2 = dist2(a.x, a.z, b.x, b.z) || 1;
+        let t = ((x - a.x) * (b.x - a.x) + (z - a.z) * (b.z - a.z)) / l2;
+        t = clamp(t, 0, 1);
+        if (dist2(x, z, lerp(a.x, b.x, t), lerp(a.z, b.z, t)) < 16) return true;
+      }
+    }
+    return false;
+  };
+  const inRect = (r, x, z) => x > r.x0 && x < r.x1 && z > r.z0 && z < r.z1;
+  W.trees = [];
+  const treeTarget = 60 + randi('gen', 0, 15);
+  for (let a = 0; a < 500 && W.trees.length < treeTarget; a++) {
+    const x = -114 + rand('gen') * 228, z = -72 + rand('gen') * (W.coastal ? 140 : 152);
+    if (inRect(W.farmRect, x, z) || inRect(W.townRect, x, z)) continue;
+    if (!W.walkable(x, z) || nearPath(x, z)) continue;
+    if (dist2(x, z, W.pool.x, W.pool.z) < 200) continue;
+    if (dist2(x, z, W.marker.x, W.marker.z) < 40) continue;
+    let ok = true;
+    for (const t of W.trees) if (dist2(x, z, t.x, t.z) < 22) { ok = false; break; }
+    if (!ok) continue;
+    W.trees.push({ x, z, kind: rand('gen') < 0.6 ? 'round' : 'pine', s: 0.85 + rand('gen') * 0.4 });
+  }
+  for (const t of W.trees) W.circles.push({ x: t.x, z: t.z, r: 0.7 });
+
+  // ---- forage spot anchors (per-day spawns pick from these) ----
+  W.forageSpots = [];
+  for (let a = 0; a < 400 && W.forageSpots.length < 26; a++) {
+    const x = -110 + rand('gen') * 220, z = -70 + rand('gen') * 138;
+    if (inRect(W.farmRect, x, z) || inRect(W.townRect, x, z)) continue;
+    if (!W.walkable(x, z) || nearPath(x, z)) continue;
+    let ok = true;
+    for (const f of W.forageSpots) if (dist2(x, z, f.x, f.z) < 60) { ok = false; break; }
+    for (const t of W.trees) if (dist2(x, z, t.x, t.z) < 4) { ok = false; break; }
+    if (ok) W.forageSpots.push({ x, z });
+  }
+
+  // ---- farm tiles ----
+  W.tiles = [];
+  const sx0 = Math.floor(CONFIG.FIELD_W / 2 - CONFIG.STARTER / 2);
+  for (let tz = 0; tz < CONFIG.FIELD_H; tz++) {
+    for (let tx = 0; tx < CONFIG.FIELD_W; tx++) {
+      const starter = tx >= sx0 && tx < sx0 + CONFIG.STARTER && tz < CONFIG.STARTER;
+      let t;
+      if (starter) t = { s: 'clear', obj: null };
+      else {
+        const r = rand('gen');
+        let obj = null;
+        if (r < 0.42) obj = 'weed';
+        else if (r < 0.55) obj = 'rock';
+        else if (r < 0.63) obj = 'stump';
+        else if (r < 0.655) obj = 'boulder';
+        else if (r < 0.68) obj = 'log';
+        t = obj ? { s: 'wild', obj } : { s: 'clear', obj: null };
+      }
+      t.crop = null; t.stage = 0; t.grown = 0; t.watered = false; t.dry = 0; t.dead = false;
+      W.tiles.push(t);
+    }
+  }
+
+  // static colliders (buildings & props) are registered during scene build
+  return W;
+}
+
+function zoneAt(x, z) {
+  const W = G.world;
+  if (!W) return 'wild';
+  if (x > W.farmRect.x0 && x < W.farmRect.x1 && z > W.farmRect.z0 && z < W.farmRect.z1) return 'farm';
+  if (x > W.townRect.x0 && x < W.townRect.x1 && z > W.townRect.z0 && z < W.townRect.z1) return 'town';
+  return 'wild';
+}
+
+function tileAt(wx, wz) {
+  const W = G.world, f = W.field;
+  const tx = Math.floor(wx) - f.x0, tz = Math.floor(wz) - f.z0;
+  if (tx < 0 || tx >= f.w || tz < 0 || tz >= f.h) return null;
+  return { t: W.tiles[tz * f.w + tx], tx, tz, idx: tz * f.w + tx };
+}
+
+function getWeather(dayIndex) {
+  const season = seasonOf(dayIndex);
+  const r = calendarDay(dayIndex).r();
+  if (season === 'Winter') return r < 0.45 ? 'snow' : 'sun';
+  if (season === 'Autumn') return r < 0.25 ? 'rain' : (r < 0.45 ? 'cloud' : 'sun');
+  if (season === 'Spring') return r < 0.3 ? 'rain' : 'sun';
+  return r < 0.15 ? 'rain' : 'sun';
+}
+// Year 1 is authored: day 2 (fair) and day 6 (Starlight) must be clear.
+function weatherFor(dayIndex) {
+  if (dayIndex === 7 || dayIndex === 11) return seasonOf(dayIndex) === 'Winter' ? 'sun' : 'cloud';
+  return getWeather(dayIndex);
+}
+
+function forageForDay(dayIndex) {
+  const season = seasonOf(dayIndex);
+  const table = CONFIG.FORAGE[season] || [];
+  if (!table.length) return [];
+  const cal = calendarDay(dayIndex ^ 0x0F0);
+  const spots = G.world.forageSpots.slice();
+  const out = [];
+  for (let i = 0; i < CONFIG.FORAGE_PER_DAY && spots.length; i++) {
+    const si = Math.floor(cal.r() * spots.length);
+    const spot = spots.splice(si, 1)[0];
+    const item = table[Math.floor(cal.r() * table.length)];
+    out.push({ x: spot.x, z: spot.z, item });
+  }
+  return out;
+}
+/* ========================= RENDER: textures ============================== */
+const TEX = {};
+function nearestTex(canvas) {
+  const t = new THREE.CanvasTexture(canvas);
+  t.magFilter = THREE.NearestFilter; t.minFilter = THREE.NearestFilter;
+  t.generateMipmaps = false;
+  return t;
+}
+function makeCanvas(w, h, fn) {
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  fn(c.getContext('2d'), w, h);
+  return c;
+}
+function speckle(ctx, w, h, colors, n) {
+  for (let i = 0; i < n; i++) {
+    ctx.fillStyle = colors[Math.floor(rand('live') * colors.length)];
+    ctx.fillRect(Math.floor(rand('live') * w), Math.floor(rand('live') * h), 1, 1);
+  }
+}
+function flatTex(base, specks, n) {
+  return nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = base; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, specks, n || 260);
+  }));
+}
+function buildStaticTextures() {
+  const P = CONFIG.PALETTE;
+  TEX.cleared = flatTex(P.cleared, ['#8d7c55', '#a09068', '#7d6c48'], 300);
+  TEX.tilled = nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = P.tilled; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#7d573f', '#966c50', '#6f4d37'], 260);
+    ctx.fillStyle = 'rgba(60,40,28,.5)';
+    for (let y = 6; y < h; y += 13) ctx.fillRect(0, y, w, 3);
+  }));
+  TEX.watered = nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = P.wateredSoil; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#5d4033', '#785443', '#523829'], 260);
+    ctx.fillStyle = 'rgba(40,26,20,.55)';
+    for (let y = 6; y < h; y += 13) ctx.fillRect(0, y, w, 3);
+  }));
+  TEX.blob = nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    const g = ctx.createRadialGradient(32, 32, 4, 32, 32, 30);
+    g.addColorStop(0, 'rgba(58,44,30,0.42)');
+    g.addColorStop(1, 'rgba(58,44,30,0)');
+    ctx.fillStyle = g; ctx.fillRect(0, 0, w, h);
+  }));
+  TEX.weed = nearestTex(makeCanvas(32, 32, (ctx) => {
+    ctx.strokeStyle = '#5E8A55'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+    for (let i = 0; i < 5; i++) {
+      const x = 6 + i * 5;
+      ctx.beginPath(); ctx.moveTo(x, 30);
+      ctx.quadraticCurveTo(x + (i % 2 ? 4 : -4), 18, x + (i % 2 ? 2 : -2), 8);
+      ctx.stroke();
+    }
+  }));
+  TEX.windowDark = nearestTex(makeCanvas(32, 32, (ctx, w, h) => {
+    ctx.fillStyle = '#4E5A66'; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#7A5C3E'; ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, w - 4, h - 4);
+    ctx.beginPath(); ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h);
+    ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+  }));
+  TEX.windowLit = nearestTex(makeCanvas(32, 32, (ctx, w, h) => {
+    ctx.fillStyle = '#F5D98A'; ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = '#FBEBB4'; ctx.fillRect(4, 4, 10, 10);
+    ctx.strokeStyle = '#7A5C3E'; ctx.lineWidth = 4;
+    ctx.strokeRect(2, 2, w - 4, h - 4);
+    ctx.beginPath(); ctx.moveTo(w / 2, 0); ctx.lineTo(w / 2, h);
+    ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke();
+  }));
+  TEX.target = nearestTex(makeCanvas(32, 32, (ctx, w, h) => {
+    ctx.strokeStyle = '#F2E8CE'; ctx.lineWidth = 4; ctx.strokeRect(2, 2, w - 4, h - 4);
+    ctx.fillStyle = 'rgba(242,232,206,.28)'; ctx.fillRect(2, 2, w - 4, h - 4);
+  }));
+}
+
+// emoji sprite (items, forage) — drawn to canvas, nearest-filtered
+const emojiCache = {};
+function emojiTex(emoji) {
+  if (emojiCache[emoji]) return emojiCache[emoji];
+  const t = nearestTex(makeCanvas(48, 48, (ctx) => {
+    ctx.font = '36px sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(emoji, 24, 26);
+  }));
+  emojiCache[emoji] = t;
+  return t;
+}
+
+// procedural signage — constant names on seeded buildings
+function signTex(text) {
+  return nearestTex(makeCanvas(128, 32, (ctx, w, h) => {
+    ctx.fillStyle = '#A97B55'; ctx.fillRect(0, 0, w, h);
+    ctx.strokeStyle = '#7A5C3E'; ctx.lineWidth = 4; ctx.strokeRect(1, 1, w - 2, h - 2);
+    ctx.fillStyle = '#3E3226'; ctx.font = 'bold 13px Trebuchet MS';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(text, w / 2, h / 2 + 1);
+  }));
+}
+
+/* ---- the painted ground: one canvas at 2px/metre ---- */
+const GROUND = { canvas: null, ctx: null, tex: null };
+function wc(x) { return (x + 120) * 2; }   // world→canvas
+function zc(z) { return (z + 90) * 2; }
+function paintPathLine(ctx, pts, w, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = w * 2; ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(wc(pts[0].x), zc(pts[0].z));
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(wc(pts[i].x), zc(pts[i].z));
+  ctx.stroke();
+}
+function paintGround(season) {
+  const P = CONFIG.PALETTE, W = G.world;
+  if (!GROUND.canvas) {
+    GROUND.canvas = document.createElement('canvas');
+    GROUND.canvas.width = 480; GROUND.canvas.height = 360;
+    GROUND.ctx = GROUND.canvas.getContext('2d');
+  }
+  const ctx = GROUND.ctx;
+  const winter = season === 'Winter';
+  const base = winter ? P.grassWinter : P.grass;
+  const shade = winter ? P.grassWinterShade : P.grassShade;
+  ctx.fillStyle = base; ctx.fillRect(0, 0, 480, 360);
+  // shade patches + speckle (deterministic-enough visual noise via live stream)
+  for (let i = 0; i < 90; i++) {
+    ctx.fillStyle = shade;
+    ctx.globalAlpha = 0.35;
+    const x = rand('live') * 480, y = rand('live') * 360, r = 6 + rand('live') * 22;
+    ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.7, 0, 0, 7); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  for (let i = 0; i < 2600; i++) {
+    ctx.fillStyle = rand('live') < 0.5 ? shade : (winter ? '#E8ECE4' : '#8FB87A');
+    ctx.fillRect(Math.floor(rand('live') * 480), Math.floor(rand('live') * 360), 1, 1);
+  }
+  if (winter) {                     // snow drifts
+    ctx.fillStyle = 'rgba(238,242,240,0.55)';
+    for (let i = 0; i < 70; i++) {
+      const x = rand('live') * 480, y = rand('live') * 360, r = 5 + rand('live') * 18;
+      ctx.beginPath(); ctx.ellipse(x, y, r, r * 0.6, 0, 0, 7); ctx.fill();
+    }
+  }
+  // ridge band (north)
+  ctx.fillStyle = P.stone;
+  ctx.fillRect(0, 0, 480, zc(-74));
+  ctx.fillStyle = winter ? '#C8CCC6' : '#8C8C84';
+  for (let i = 0; i < 300; i++) ctx.fillRect(Math.floor(rand('live') * 480), Math.floor(rand('live') * zc(-74)), 2, 1);
+  // farm field scruff
+  ctx.fillStyle = winter ? '#B0A88E' : '#8FA06A';
+  ctx.globalAlpha = 0.5;
+  ctx.fillRect(wc(W.field.x0), zc(W.field.z0), W.field.w * 2, W.field.h * 2);
+  ctx.globalAlpha = 1;
+  // paths
+  for (const p of W.paths) paintPathLine(ctx, p.pts, p.w, P.path);
+  // town square apron
+  ctx.fillStyle = P.path;
+  ctx.beginPath(); ctx.ellipse(wc(W.gazebo.x), zc(W.gazebo.z), 24, 16, 0, 0, 7); ctx.fill();
+  // beach / ocean
+  if (W.coastal) {
+    ctx.fillStyle = P.sand; ctx.fillRect(0, zc(W.oceanZ - 5), 480, 12);
+    ctx.fillStyle = P.water; ctx.fillRect(0, zc(W.oceanZ), 480, 360 - zc(W.oceanZ));
+  }
+  // sand ring around the pool, then water
+  ctx.fillStyle = P.sand;
+  ctx.beginPath(); ctx.ellipse(wc(W.pool.x), zc(W.pool.z), (W.pool.r + 2.5) * 2, (W.pool.r + 2) * 2, 0, 0, 7); ctx.fill();
+  paintPathLine(ctx, W.river, W.riverW + 1.6, P.sand);
+  paintPathLine(ctx, W.river, W.riverW, P.water);
+  ctx.fillStyle = P.water;
+  ctx.beginPath(); ctx.ellipse(wc(W.pool.x), zc(W.pool.z), W.pool.r * 2, W.pool.r * 1.9, 0, 0, 7); ctx.fill();
+  if (!GROUND.tex) GROUND.tex = nearestTex(GROUND.canvas);
+  else GROUND.tex.needsUpdate = true;
+}
+
+/* ---- animated water sparkle overlay: two frames swapped every 0.5s ---- */
+const WATER = { frames: [], tex: null, mesh: null, idx: 0, t: 0 };
+function isWaterAt(x, z) {
+  const W = G.world;
+  if (W.coastal && z > W.oceanZ) return true;
+  if (dist2(x, z, W.pool.x, W.pool.z) < (W.pool.r - 0.5) * (W.pool.r - 0.5)) return true;
+  for (let i = 0; i < W.river.length - 1; i++) {
+    const a = W.river[i], b = W.river[i + 1];
+    const l2 = dist2(a.x, a.z, b.x, b.z) || 1;
+    let t = ((x - a.x) * (b.x - a.x) + (z - a.z) * (b.z - a.z)) / l2;
+    t = clamp(t, 0, 1);
+    if (dist2(x, z, lerp(a.x, b.x, t), lerp(a.z, b.z, t)) < (W.riverW / 2 - 0.4) ** 2) return true;
+  }
+  return false;
+}
+function buildWaterFrames() {
+  WATER.frames = [];
+  for (let f = 0; f < 2; f++) {
+    WATER.frames.push(makeCanvas(480, 360, (ctx) => {
+      ctx.clearRect(0, 0, 480, 360);
+      ctx.fillStyle = 'rgba(235,245,250,0.5)';
+      for (let i = 0; i < 900; i++) {
+        const x = -120 + rand('live') * 240, z = -90 + rand('live') * 180;
+        if (isWaterAt(x, z)) ctx.fillRect(Math.floor(wc(x)), Math.floor(zc(z)), 2, 1);
+      }
+      ctx.fillStyle = 'rgba(90,140,160,0.5)';
+      for (let i = 0; i < 500; i++) {
+        const x = -120 + rand('live') * 240, z = -90 + rand('live') * 180;
+        if (isWaterAt(x, z)) ctx.fillRect(Math.floor(wc(x)), Math.floor(zc(z)), 2, 1);
+      }
+    }));
+  }
+  WATER.tex = nearestTex(WATER.frames[0]);
+}
+function tickWater(dt) {
+  if (!WATER.tex) return;
+  WATER.t += dt;
+  if (WATER.t > 0.5) {
+    WATER.t = 0; WATER.idx = 1 - WATER.idx;
+    WATER.tex.image = WATER.frames[WATER.idx];
+    WATER.tex.needsUpdate = true;
+  }
+}
+/* ========================= RENDER: scene build =========================== */
+const R = {
+  renderer: null, scene: null, camera: null, ambient: null, dir: null,
+  followX: 0, followZ: 0, viewH: 15, viewHTarget: 15,
+  worldGroup: null, windowMeshes: [], target: null, particles: null,
+  glyphs: {}, scale: 1
+};
+
+function initThree() {
+  const P = CONFIG.PALETTE;
+  R.renderer = new THREE.WebGLRenderer({ canvas: $('c'), antialias: false });
+  R.renderer.setSize(CONFIG.VIEW_W, CONFIG.VIEW_H, false);
+  R.renderer.setPixelRatio(1);
+  R.scene = new THREE.Scene();
+  R.scene.background = new THREE.Color(P.sky);
+  R.scene.fog = new THREE.Fog(new THREE.Color(P.sky), 55, 140);
+  const aspect = CONFIG.VIEW_W / CONFIG.VIEW_H;
+  R.camera = new THREE.OrthographicCamera(-R.viewH * aspect / 2, R.viewH * aspect / 2,
+    R.viewH / 2, -R.viewH / 2, 0.1, 200);
+  R.ambient = new THREE.AmbientLight(0xffffff, 0.78);
+  R.scene.add(R.ambient);
+  R.dir = new THREE.DirectionalLight(0xfff4e0, 0.55);
+  R.scene.add(R.dir); R.scene.add(R.dir.target);
+}
+
+function setFrustum(h) {
+  const aspect = CONFIG.VIEW_W / CONFIG.VIEW_H;
+  R.camera.left = -h * aspect / 2; R.camera.right = h * aspect / 2;
+  R.camera.top = h / 2; R.camera.bottom = -h / 2;
+  R.camera.updateProjectionMatrix();
+}
+
+function updateCamera(px, pz, snap) {
+  const dx = px - R.followX, dz = pz - R.followZ;
+  const d = Math.hypot(dx, dz);
+  if (snap) { R.followX = px; R.followZ = pz; }
+  else if (d > CONFIG.CAM_DEADZONE) {
+    R.followX += dx * CONFIG.CAM_LERP; R.followZ += dz * CONFIG.CAM_LERP;
+  }
+  const zone = zoneAt(px, pz);
+  R.viewHTarget = CONFIG.ZONE_HEIGHT[zone] || CONFIG.ZONE_HEIGHT.wild;
+  R.viewH = lerp(R.viewH, R.viewHTarget, CONFIG.ZONE_EASE);
+  setFrustum(R.viewH);
+  const o = CONFIG.CAM_OFFSET;
+  R.camera.position.set(R.followX + o.x, o.y, R.followZ + o.z);
+  R.camera.lookAt(R.followX, 0, R.followZ);
+  // the clay secret: headlamp light rides the camera, target rides the look-at
+  R.dir.position.copy(R.camera.position);
+  R.dir.target.position.set(R.followX, 0, R.followZ);
+  R.dir.target.updateMatrixWorld();
+}
+
+const MAT = {};
+function lambert(color) { return new THREE.MeshLambertMaterial({ color }); }
+function buildMaterials() {
+  const P = CONFIG.PALETTE;
+  MAT.wood = lambert(P.wood); MAT.woodDark = lambert('#8a6244');
+  MAT.roofRed = lambert(P.roofRed); MAT.roofTeal = lambert(P.roofTeal);
+  MAT.stone = lambert(P.stone); MAT.plaster = lambert('#E3D6B8');
+  MAT.trunk = lambert('#7d5a3e');
+  MAT.canopy = lambert('#5E8A55'); MAT.pine = lambert('#4E7A55');
+  MAT.door = lambert('#6b4a30');
+  MAT.blob = new THREE.MeshBasicMaterial({ map: TEX.blob, transparent: true, depthWrite: false });
+}
+
+function addBlob(parent, x, z, s, opacity) {
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(s, s * 0.8),
+    new THREE.MeshBasicMaterial({ map: TEX.blob, transparent: true, depthWrite: false, opacity: opacity || 1 }));
+  m.rotation.x = -Math.PI / 2; m.position.set(x, 0.008, z);
+  parent.add(m);
+  return m;
+}
+function registerBox(x, z, hw, hd) { G.world.colliders.push({ x, z, hw, hd }); }
+
+function makeRoof(w, d, h, mat) {
+  const shape = new THREE.Shape();
+  shape.moveTo(-d / 2, 0); shape.lineTo(d / 2, 0); shape.lineTo(0, h); shape.closePath();
+  const geo = new THREE.ExtrudeGeometry(shape, { depth: w, bevelEnabled: false });
+  geo.translate(0, 0, -w / 2);
+  geo.rotateY(Math.PI / 2);
+  return new THREE.Mesh(geo, mat);
+}
+
+function makeBuilding(def) {
+  const g = new THREE.Group();
+  const h = def.h || 3.4;
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(def.w, h, def.d),
+    def.wall || MAT.plaster);
+  wall.position.y = h / 2; g.add(wall);
+  const roof = makeRoof(def.w + 1.2, def.d + 1.2, def.w * 0.32,
+    def.roof === 'teal' ? MAT.roofTeal : MAT.roofRed);
+  roof.position.y = h; g.add(roof);
+  // oversized door, camera-south face
+  const door = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 2.5), MAT.door);
+  door.position.set(0, 1.25, def.d / 2 + 0.03); g.add(door);
+  const frame = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 2.7), MAT.woodDark);
+  frame.position.set(0, 1.35, def.d / 2 + 0.02); g.add(frame);
+  // windows
+  for (const wx of [-def.w / 4 - 0.4, def.w / 4 + 0.4]) {
+    const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2),
+      new THREE.MeshBasicMaterial({ map: TEX.windowDark }));
+    win.position.set(wx, 1.7, def.d / 2 + 0.03);
+    g.add(win); R.windowMeshes.push(win);
+  }
+  if (def.name) {
+    const sign = new THREE.Mesh(new THREE.PlaneGeometry(4.4, 1.1),
+      new THREE.MeshBasicMaterial({ map: signTex(def.name), transparent: false }));
+    sign.position.set(0, h + 0.15, def.d / 2 + 0.05); g.add(sign);
+  }
+  return g;
+}
+
+function buildWorldScene() {
+  const P = CONFIG.PALETTE, W = G.world;
+  if (R.worldGroup) R.scene.remove(R.worldGroup);
+  R.worldGroup = new THREE.Group();
+  R.windowMeshes = [];
+  const WG = R.worldGroup;
+
+  // ground + water overlay
+  paintGround(seasonOf(G.day));
+  const ground = new THREE.Mesh(new THREE.PlaneGeometry(240, 180),
+    new THREE.MeshLambertMaterial({ map: GROUND.tex }));
+  ground.rotation.x = -Math.PI / 2; WG.add(ground);
+  buildWaterFrames();
+  const waterM = new THREE.Mesh(new THREE.PlaneGeometry(240, 180),
+    new THREE.MeshBasicMaterial({ map: WATER.tex, transparent: true, depthWrite: false }));
+  waterM.rotation.x = -Math.PI / 2; waterM.position.y = 0.02; WG.add(waterM);
+
+  W.doors = [];
+  // farmhouse
+  const house = makeBuilding({ w: W.house.w, d: W.house.d, h: 3.8, roof: 'red', name: G.farmName });
+  house.position.set(W.house.x, 0, W.house.z); WG.add(house);
+  addBlob(WG, W.house.x, W.house.z + 1, W.house.w * 1.5, 0.55);
+  registerBox(W.house.x, W.house.z, W.house.w / 2 + 0.2, W.house.d / 2 + 0.2);
+  W.doors.push({ id: 'farmhouse', x: W.house.x, z: W.house.z + W.house.d / 2 + 0.6 });
+
+  // shops along main street
+  for (const s of W.shops) {
+    const b = makeBuilding({ w: s.w, d: s.d, roof: s.roof, name: s.name });
+    b.position.set(s.x, 0, s.z); WG.add(b);
+    addBlob(WG, s.x, s.z + 1, s.w * 1.5, 0.5);
+    registerBox(s.x, s.z, s.w / 2 + 0.2, s.d / 2 + 0.2);
+    if (s.name) W.doors.push({ id: s.id, x: s.x, z: s.z + s.d / 2 + 0.6, name: s.name });
+    if (s.id === 'general') {
+      // back-room window (west side) — lit on Restdays before the network
+      const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2),
+        new THREE.MeshBasicMaterial({ map: TEX.windowDark }));
+      win.position.set(-s.w / 2 - 0.03, 1.7, s.z - s.z);   // local coords
+      win.rotation.y = -Math.PI / 2;
+      b.add(win); R.backroomWindow = win;
+      // ledger-green counter glyph, hidden until connected
+      const glyph = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.0),
+        new THREE.MeshBasicMaterial({ map: emojiTex('✳'), transparent: true, color: P.green }));
+      glyph.position.set(1.6, 2.9, s.d / 2 + 0.06);
+      glyph.visible = false; b.add(glyph);
+      R.glyphs.general = glyph;
+    }
+  }
+
+  // gazebo
+  const gz = new THREE.Group();
+  const plat = new THREE.Mesh(new THREE.CylinderGeometry(2.8, 3.0, 0.35, 8), MAT.wood);
+  plat.position.y = 0.18; gz.add(plat);
+  for (let i = 0; i < 6; i++) {
+    const a = i / 6 * Math.PI * 2;
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.22, 2.4, 0.22), MAT.woodDark);
+    post.position.set(Math.cos(a) * 2.4, 1.5, Math.sin(a) * 2.4); gz.add(post);
+  }
+  const groof = new THREE.Mesh(new THREE.ConeGeometry(3.3, 1.5, 8), MAT.roofTeal);
+  groof.position.y = 3.3; gz.add(groof);
+  gz.position.set(W.gazebo.x, 0, W.gazebo.z); WG.add(gz);
+  addBlob(WG, W.gazebo.x, W.gazebo.z, 8, 0.4);
+
+  // well
+  const well = new THREE.Group();
+  const wellBase = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1, 0.9, 10), MAT.stone);
+  wellBase.position.y = 0.45; well.add(wellBase);
+  const wellRoof = new THREE.Mesh(new THREE.ConeGeometry(1.2, 0.8, 6), MAT.roofRed);
+  wellRoof.position.y = 2.2; well.add(wellRoof);
+  for (const px of [-0.8, 0.8]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.8, 0.15), MAT.woodDark);
+    post.position.set(px, 1.0, 0); well.add(post);
+  }
+  well.position.set(W.well.x, 0, W.well.z); WG.add(well);
+  addBlob(WG, W.well.x, W.well.z, 2.6, 0.5);
+  G.world.circles.push({ x: W.well.x, z: W.well.z, r: 1.1 });
+
+  // shipping bin
+  const bin = new THREE.Group();
+  const binBox = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.0, 1.2), MAT.wood);
+  binBox.position.y = 0.5; bin.add(binBox);
+  const lid = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.15, 1.3), MAT.woodDark);
+  lid.position.y = 1.05; bin.add(lid);
+  bin.position.set(W.bin.x, 0, W.bin.z); WG.add(bin);
+  addBlob(WG, W.bin.x, W.bin.z, 2.6, 0.5);
+  registerBox(W.bin.x, W.bin.z, 1.1, 0.8);
+
+  // mailbox on a post
+  const mb = new THREE.Group();
+  const mpost = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12), MAT.woodDark);
+  mpost.position.y = 0.55; mb.add(mpost);
+  const mboxm = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.4, 0.35), MAT.roofRed);
+  mboxm.position.y = 1.25; mb.add(mboxm);
+  mb.position.set(W.mailbox.x, 0, W.mailbox.z); WG.add(mb);
+  R.mailFlag = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.3),
+    new THREE.MeshBasicMaterial({ map: emojiTex('✉'), transparent: true }));
+  R.mailFlag.position.set(W.mailbox.x, 1.75, W.mailbox.z); R.mailFlag.visible = false;
+  WG.add(R.mailFlag);
+
+  // farm fence + gate opening (east, at the path)
+  const fx0 = W.field.x0 - 2, fx1 = W.field.x0 + W.field.w + 2;
+  const fz0 = W.house.z - 5, fz1 = W.field.z0 + W.field.h + 2;
+  const posts = [];
+  for (let x = fx0; x <= fx1; x += 2) { posts.push([x, fz0]); posts.push([x, fz1]); }
+  for (let z = fz0; z <= fz1; z += 2) {
+    posts.push([fx0, z]);
+    if (Math.abs(z - W.pathZ) > 2.2) posts.push([fx1, z]);
+  }
+  const postGeo = new THREE.BoxGeometry(0.18, 1.0, 0.18);
+  const postIM = new THREE.InstancedMesh(postGeo, MAT.woodDark, posts.length);
+  const dummy = new THREE.Object3D();
+  posts.forEach((p, i) => {
+    dummy.position.set(p[0], 0.5, p[1]); dummy.rotation.set(0, 0, 0); dummy.updateMatrix();
+    postIM.setMatrixAt(i, dummy.matrix);
+  });
+  WG.add(postIM);
+  registerBox((fx0 + fx1) / 2, fz0, (fx1 - fx0) / 2, 0.25);
+  registerBox((fx0 + fx1) / 2, fz1, (fx1 - fx0) / 2, 0.25);
+  registerBox(fx0, (fz0 + fz1) / 2, 0.25, (fz1 - fz0) / 2);
+  registerBox(fx1, (fz0 + W.pathZ - 2.2) / 2, 0.25, (W.pathZ - 2.2 - fz0) / 2);
+  registerBox(fx1, (W.pathZ + 2.2 + fz1) / 2, 0.25, (fz1 - W.pathZ - 2.2) / 2);
+
+  // bridge, dock, bench, marker
+  const bridge = new THREE.Mesh(new THREE.BoxGeometry(W.riverW + 3, 0.25, 4.4), MAT.wood);
+  bridge.position.set(W.bridge.x, 0.1, W.pathZ); WG.add(bridge);
+  const dock = new THREE.Mesh(new THREE.BoxGeometry(2, 0.2, 5), MAT.woodDark);
+  dock.position.set(W.dock.x, 0.15, W.dock.z + 2); WG.add(dock);
+  const bench = new THREE.Group();
+  const seat = new THREE.Mesh(new THREE.BoxGeometry(2, 0.12, 0.5), MAT.wood);
+  seat.position.y = 0.5; bench.add(seat);
+  const back = new THREE.Mesh(new THREE.BoxGeometry(2, 0.5, 0.1), MAT.wood);
+  back.position.set(0, 0.85, -0.22); bench.add(back);
+  for (const lx of [-0.8, 0.8]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.4), MAT.woodDark);
+    leg.position.set(lx, 0.25, 0); bench.add(leg);
+  }
+  bench.position.set(W.bench.x, 0, W.bench.z); WG.add(bench);
+  addBlob(WG, W.bench.x, W.bench.z, 2.4, 0.45);
+  const marker = new THREE.Group();
+  const mstone = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.6, 0.5), MAT.stone);
+  mstone.position.y = 0.8; marker.add(mstone);
+  const ledge = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.18, 0.9), MAT.stone);
+  ledge.position.set(0, 0.5, 0.6); marker.add(ledge);
+  marker.position.set(W.marker.x, 0, W.marker.z); WG.add(marker);
+  addBlob(WG, W.marker.x, W.marker.z, 2.2, 0.5);
+  G.world.circles.push({ x: W.marker.x, z: W.marker.z, r: 0.9 });
+
+  // ranch gate (Greta's, east end)
+  const rg = new THREE.Group();
+  for (const gx of [-2, 2]) {
+    const post = new THREE.Mesh(new THREE.BoxGeometry(0.3, 2.8, 0.3), MAT.woodDark);
+    post.position.set(gx, 1.4, 0); rg.add(post);
+  }
+  const lintel = new THREE.Mesh(new THREE.BoxGeometry(4.6, 0.4, 0.3), MAT.wood);
+  lintel.position.y = 2.8; rg.add(lintel);
+  const rsign = new THREE.Mesh(new THREE.PlaneGeometry(3.4, 0.9),
+    new THREE.MeshBasicMaterial({ map: signTex("Greta's Ranch") }));
+  rsign.position.set(0, 2.2, 0.2); rg.add(rsign);
+  rg.position.set(W.ranchGate.x, 0, W.ranchGate.z - 2); WG.add(rg);
+
+  // water tower silhouette (register: rural Americana)
+  const wt = new THREE.Group();
+  const tank = new THREE.Mesh(new THREE.CylinderGeometry(2.2, 2.2, 3, 10), MAT.woodDark);
+  tank.position.y = 8; wt.add(tank);
+  const wtRoof = new THREE.Mesh(new THREE.ConeGeometry(2.6, 1.4, 10), MAT.roofRed);
+  wtRoof.position.y = 10.2; wt.add(wtRoof);
+  for (let i = 0; i < 4; i++) {
+    const a = i / 4 * Math.PI * 2 + Math.PI / 4;
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.22, 7, 0.22), MAT.woodDark);
+    leg.position.set(Math.cos(a) * 1.7, 3.5, Math.sin(a) * 1.7); wt.add(leg);
+  }
+  wt.position.set(W.town.x + 34, 0, -10); WG.add(wt);
+  addBlob(WG, W.town.x + 34, -10, 6, 0.4);
+  G.world.circles.push({ x: W.town.x + 34, z: -10, r: 2.2 });
+
+  // mountains along the north ridge
+  for (let x = -116; x < 120; x += 15) {
+    const hgt = 9 + rand('live') * 8, rad = 8 + rand('live') * 4;
+    const mt = new THREE.Mesh(new THREE.ConeGeometry(rad, hgt, 7), MAT.stone);
+    mt.position.set(x + rand('live') * 6, hgt / 2 - 0.5, -84 + rand('live') * 4);
+    WG.add(mt);
+    const cap = new THREE.Mesh(new THREE.ConeGeometry(rad * 0.4, hgt * 0.3, 7), lambert('#E8ECE8'));
+    cap.position.set(mt.position.x, hgt * 0.82, mt.position.z);
+    WG.add(cap);
+  }
+
+  // trees: instanced trunks + canopies
+  const trees = W.trees;
+  const trunkIM = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.3, 1.4, 6), MAT.trunk, trees.length);
+  const rounds = trees.filter(t => t.kind === 'round');
+  const pines = trees.filter(t => t.kind === 'pine');
+  const roundIM = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1.7, 0), MAT.canopy, Math.max(1, rounds.length));
+  const pineIM = new THREE.InstancedMesh(new THREE.ConeGeometry(1.5, 3.4, 7), MAT.pine, Math.max(1, pines.length));
+  trees.forEach((t, i) => {
+    dummy.position.set(t.x, 0.7 * t.s, t.z); dummy.scale.set(t.s, t.s, t.s);
+    dummy.rotation.set(0, 0, 0); dummy.updateMatrix();
+    trunkIM.setMatrixAt(i, dummy.matrix);
+  });
+  rounds.forEach((t, i) => {
+    dummy.position.set(t.x, 2.3 * t.s, t.z); dummy.scale.set(t.s, t.s, t.s); dummy.updateMatrix();
+    roundIM.setMatrixAt(i, dummy.matrix);
+  });
+  pines.forEach((t, i) => {
+    dummy.position.set(t.x, 2.6 * t.s, t.z); dummy.scale.set(t.s, t.s, t.s); dummy.updateMatrix();
+    pineIM.setMatrixAt(i, dummy.matrix);
+  });
+  WG.add(trunkIM); WG.add(roundIM); WG.add(pineIM);
+  R.canopyMats = [MAT.canopy, MAT.pine];
+  for (const t of trees) addBlob(WG, t.x, t.z, 3.4 * t.s, 0.45);
+
+  // target highlight quad
+  R.target = new THREE.Mesh(new THREE.PlaneGeometry(0.96, 0.96),
+    new THREE.MeshBasicMaterial({ map: TEX.target, transparent: true, opacity: 0.25, depthWrite: false }));
+  R.target.rotation.x = -Math.PI / 2; R.target.position.y = 0.03;
+  WG.add(R.target);
+
+  buildTileLayers(WG);
+  buildParticles(WG);
+  R.scene.add(WG);
+}
+
+/* ---- instanced farm-tile overlays & crops ---- */
+const TL = { layers: {}, dirty: true, group: null };
+function cropVisualStage(t) {
+  const days = CONFIG.CROPS[t.crop].days;
+  if (t.grown >= days) return 3;
+  if (t.grown === 0) return 0;
+  return t.grown / days >= 0.5 ? 2 : 1;
+}
+function buildTileLayers(parent) {
+  TL.layers = {}; TL.dirty = true;
+  const cap = CONFIG.FIELD_W * CONFIG.FIELD_H;
+  const planeGeo = new THREE.PlaneGeometry(0.96, 0.96);
+  const mk = (name, geo, mat, capacity) => {
+    const im = new THREE.InstancedMesh(geo, mat, capacity || cap);
+    im.count = 0; im.frustumCulled = false; parent.add(im);
+    TL.layers[name] = im;
+    return im;
+  };
+  const flat = tex => new THREE.MeshLambertMaterial({ map: tex });
+  mk('clear', planeGeo, flat(TEX.cleared));
+  mk('till', planeGeo, flat(TEX.tilled));
+  mk('water', planeGeo, flat(TEX.watered));
+  mk('weed', new THREE.PlaneGeometry(0.8, 0.8),
+    new THREE.MeshLambertMaterial({ map: TEX.weed, transparent: true, side: THREE.DoubleSide }));
+  mk('rock', new THREE.DodecahedronGeometry(0.32, 0), MAT.stone);
+  mk('stump', new THREE.CylinderGeometry(0.34, 0.42, 0.5, 8), MAT.trunk);
+  mk('boulder', new THREE.DodecahedronGeometry(0.62, 0), MAT.stone);
+  mk('log', new THREE.CylinderGeometry(0.3, 0.3, 1.4, 8), MAT.trunk);
+  mk('dead', new THREE.ConeGeometry(0.16, 0.4, 5), lambert('#8C8474'));
+  const sproutMat = lambert('#5E8A55');
+  mk('crop0', new THREE.SphereGeometry(0.08, 6, 5), sproutMat);
+  mk('crop1', new THREE.ConeGeometry(0.13, 0.38, 6), sproutMat);
+  mk('crop2', new THREE.ConeGeometry(0.18, 0.6, 6), lambert('#4E7A48'));
+  for (const id in CONFIG.CROPS) {
+    mk('ripe_' + id, new THREE.SphereGeometry(0.24, 8, 6), lambert(CONFIG.CROPS[id].color));
+  }
+}
+const tlDummy = new THREE.Object3D();
+function rebuildTiles() {
+  if (!TL.dirty) return;
+  TL.dirty = false;
+  const W = G.world, f = W.field;
+  const counts = {};
+  const put = (layer, x, y, z, ry) => {
+    const im = TL.layers[layer];
+    const i = counts[layer] = (counts[layer] || 0);
+    tlDummy.position.set(x, y, z);
+    tlDummy.rotation.set(layer === 'clear' || layer === 'till' || layer === 'water' ? -Math.PI / 2 : 0, ry || 0, 0);
+    if (layer === 'log') tlDummy.rotation.set(0, 0.4, Math.PI / 2);
+    tlDummy.scale.set(1, 1, 1);
+    tlDummy.updateMatrix();
+    im.setMatrixAt(i, tlDummy.matrix);
+    counts[layer] = i + 1;
+  };
+  for (let tz = 0; tz < f.h; tz++) for (let tx = 0; tx < f.w; tx++) {
+    const t = W.tiles[tz * f.w + tx];
+    const x = f.x0 + tx + 0.5, z = f.z0 + tz + 0.5;
+    if (t.s === 'clear') put('clear', x, 0.012, z);
+    if (t.s === 'till') put(t.watered ? 'water' : 'till', x, 0.014, z);
+    if (t.obj === 'weed') { put('weed', x, 0.4, z, 0.3); put('weed', x, 0.4, z, 1.87); }
+    else if (t.obj) put(t.obj, x, t.obj === 'rock' ? 0.2 : 0.25, z);
+    if (t.crop && !t.dead) {
+      const vs = cropVisualStage(t);
+      if (vs === 3) put('ripe_' + t.crop, x, 0.3, z);
+      else put('crop' + vs, x, vs === 0 ? 0.08 : 0.2, z);
+    }
+    if (t.crop && t.dead) put('dead', x, 0.2, z);
+  }
+  for (const name in TL.layers) {
+    TL.layers[name].count = counts[name] || 0;
+    TL.layers[name].instanceMatrix.needsUpdate = true;
+  }
+}
+
+/* ---- forage items on the ground ---- */
+const FORAGE_LIVE = [];
+function spawnForage() {
+  for (const fmesh of FORAGE_LIVE) R.worldGroup.remove(fmesh.mesh);
+  FORAGE_LIVE.length = 0;
+  for (const f of forageForDay(G.day)) {
+    if (G.dayFlags['picked_' + Math.round(f.x) + '_' + Math.round(f.z)]) continue;
+    const g = new THREE.Group();
+    const sprite = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.7),
+      new THREE.MeshBasicMaterial({ map: emojiTex(f.item.icon), transparent: true }));
+    sprite.position.y = 0.35; g.add(sprite);
+    addBlob(g, 0, 0, 0.9, 0.6);
+    g.position.set(f.x, 0, f.z);
+    R.worldGroup.add(g);
+    FORAGE_LIVE.push({ x: f.x, z: f.z, item: f.item, mesh: g, sprite });
+  }
+}
+
+/* ---- weather particles (rain / snow) ---- */
+function buildParticles(parent) {
+  const n = 320;
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(n * 3);
+  for (let i = 0; i < n; i++) {
+    pos[i * 3] = (Math.random() - 0.5) * 40;
+    pos[i * 3 + 1] = Math.random() * 16;
+    pos[i * 3 + 2] = (Math.random() - 0.5) * 30;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  const mat = new THREE.PointsMaterial({ color: 0xdde8f0, size: 0.14, transparent: true, opacity: 0.8 });
+  R.particles = new THREE.Points(geo, mat);
+  R.particles.visible = false; R.particles.frustumCulled = false;
+  parent.add(R.particles);
+}
+function tickParticles(dt) {
+  const p = R.particles;
+  if (!p) return;
+  const raining = G.weather === 'rain', snowing = G.weather === 'snow';
+  p.visible = raining || snowing;
+  if (!p.visible) return;
+  p.material.size = snowing ? 0.18 : 0.1;
+  p.material.color.set(snowing ? 0xf4f6f4 : 0xaCc4d4);
+  const arr = p.geometry.attributes.position.array;
+  const fall = snowing ? 2.2 : 16;
+  for (let i = 0; i < arr.length; i += 3) {
+    arr[i + 1] -= fall * dt;
+    if (snowing) arr[i] += Math.sin((arr[i + 1] + i) * 0.8) * dt * 0.6;
+    if (arr[i + 1] < 0) {
+      arr[i + 1] = 14 + Math.random() * 3;
+      arr[i] = (Math.random() - 0.5) * 40;
+      arr[i + 2] = (Math.random() - 0.5) * 30;
+    }
+  }
+  p.position.set(R.followX, 0, R.followZ);
+  p.geometry.attributes.position.needsUpdate = true;
+}
+
+/* ---- day-grade overlays, window lights, sky ---- */
+function applyGrade() {
+  const season = seasonOf(G.day);
+  const dusk = CONFIG.DUSK_HOUR[season], night = CONFIG.NIGHT_HOUR[season];
+  const soft = $('gradeSoft'), mult = $('gradeMult');
+  const P = CONFIG.PALETTE;
+  let phase = 'day';
+  if (G.hour >= night) phase = 'night';
+  else if (G.hour >= dusk) phase = 'evening';
+  if (phase === 'day') {
+    soft.style.opacity = 0; mult.style.opacity = 0;
+    R.ambient.intensity = 0.78;
+    R.scene.background.set(G.weather === 'rain' || G.weather === 'cloud' ? '#A8BCC4' : P.sky);
+  } else if (phase === 'evening') {
+    soft.style.background = '#E8A87C'; soft.style.opacity = 0.5;
+    mult.style.background = '#e0c0b0'; mult.style.opacity = 0.25;
+    R.ambient.intensity = 0.72;
+    R.scene.background.set('#D8B49A');
+  } else {
+    soft.style.background = '#8a94c0'; soft.style.opacity = 0.3;
+    mult.style.background = '#4A5578'; mult.style.opacity = 0.42;
+    R.ambient.intensity = 0.55;
+    R.scene.background.set(P.skyNight);
+  }
+  R.scene.fog.color.copy(R.scene.background);
+  // windows go emissive by texture swap at dusk
+  const lit = phase !== 'day';
+  for (const w of R.windowMeshes) {
+    const want = lit ? TEX.windowLit : TEX.windowDark;
+    if (w.material.map !== want) { w.material.map = want; w.material.needsUpdate = true; }
+  }
+  // Bramm's back-room light: lit on Restdays until the network frees him (day, too)
+  if (R.backroomWindow) {
+    const backLit = (!G.network.connected.general && isRestday(G.day)) || lit;
+    const want = backLit ? TEX.windowLit : TEX.windowDark;
+    if (R.backroomWindow.material.map !== want) {
+      R.backroomWindow.material.map = want; R.backroomWindow.material.needsUpdate = true;
+    }
+  }
+}
+/* ======================== CAST: chibi characters ========================= */
+// Super-deformed: head ≈ 1/3 height, stubby limbs, dot eyes. Live 3D chibis
+// (spec-sanctioned fallback); the bake pipeline arrives with phase 2's cast.
+const SKINS = ['#E8C49C', '#D4A374', '#B07E52', '#8A5C38'];
+const HAIRS = ['#5A4030', '#2E2620', '#B08040', '#C4643C', '#8C8C84', '#E0C070'];
+const SHIRTS = ['#5E8E8A', '#B3574C', '#4E7A5A', '#B99A6B', '#6A6AA0', '#C48A3C'];
+
+function makeChibi(rec) {
+  const g = new THREE.Group();
+  const skin = lambert(rec.skin), hair = lambert(rec.hair);
+  const shirt = lambert(rec.shirt), pants = lambert(rec.pants || '#6b5a44');
+  const legs = [], arms = [];
+  for (const sx of [-0.1, 0.1]) {
+    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.32, 0.15), pants);
+    leg.position.set(sx, 0.16, 0);
+    leg.geometry.translate(0, -0.14, 0); leg.position.y = 0.3;
+    g.add(leg); legs.push(leg);
+  }
+  const body = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.44, 0.28), shirt);
+  body.position.y = 0.52; g.add(body);
+  for (const sx of [-0.28, 0.28]) {
+    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.36, 0.11), shirt);
+    arm.geometry.translate(0, -0.14, 0);
+    arm.position.set(sx, 0.7, 0); g.add(arm); arms.push(arm);
+  }
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.34, 10, 8), skin);
+  head.position.y = 1.05; g.add(head);
+  const hairM = new THREE.Mesh(new THREE.SphereGeometry(0.365, 10, 8,
+    0, Math.PI * 2, 0, Math.PI * 0.55), hair);
+  hairM.position.y = 1.1; g.add(hairM);
+  if (rec.long) {
+    const back = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.5, 0.16), hair);
+    back.position.set(0, 0.85, -0.2); g.add(back);
+  }
+  for (const ex of [-0.12, 0.12]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.038, 6, 5), lambert('#2E2620'));
+    eye.position.set(ex, 1.06, 0.3); g.add(eye);
+  }
+  if (rec.hat) {
+    const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.05, 10), lambert(rec.hat));
+    brim.position.y = 1.3; g.add(brim);
+    const top = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.3, 0.22, 10), lambert(rec.hat));
+    top.position.y = 1.42; g.add(top);
+  }
+  g.userData = { legs, arms };
+  return g;
+}
+
+// The twelve villagers: authored constants (full cast fidelity lands phase 2).
+const CAST = {
+  bramm:  { name: 'Bramm',   skin: SKINS[1], hair: '#8C8C84', shirt: '#7A5C3E', hat: null },
+  hetta:  { name: 'Hetta',   skin: SKINS[2], hair: '#2E2620', shirt: '#B3574C', long: true },
+  corwin: { name: 'Corwin',  skin: SKINS[1], hair: '#B08040', shirt: '#4E7A5A' },
+  isolde: { name: 'Isolde',  skin: SKINS[0], hair: '#5A4030', shirt: '#E3D6B8', long: true },
+  rolf:   { name: 'Rolf',    skin: SKINS[2], hair: '#C4643C', shirt: '#6A6AA0', hat: '#8a6244' },
+  maren:  { name: 'Maren',   skin: SKINS[0], hair: '#C4643C', shirt: '#5E8E8A', long: true },
+  greta:  { name: 'Greta',   skin: SKINS[1], hair: '#E0C070', shirt: '#C48A3C', long: true, hat: '#B99A6B' },
+  aldwin: { name: 'Aldwin',  skin: SKINS[0], hair: '#D8D8D0', shirt: '#4E5A66' },
+  ness:   { name: 'Old Ness', skin: SKINS[3], hair: '#8C8C84', shirt: '#3E4E42', hat: '#4E5A66' },
+  fen:    { name: 'Fen',     skin: SKINS[2], hair: '#2E2620', shirt: '#8C9682' },
+  pip:    { name: 'Pip',     skin: SKINS[1], hair: '#B08040', shirt: '#C65B5B' },
+  sable:  { name: 'Sable',   skin: SKINS[0], hair: '#2E2620', shirt: '#5A4A6A', long: true }
+};
+
+const ACTORS = {};   // id -> actor (player + present villagers)
+function makeActor(id, rec, x, z) {
+  const group = makeChibi(rec);
+  group.position.set(x, 0, z);
+  const blob = addBlob(group, 0, 0, 1.1, 0.8);
+  blob.position.y = 0.01;
+  R.scene.add(group);
+  const a = {
+    id, rec, group, x, z, face: Math.PI,             // face south (camera)
+    speed: CONFIG.NPC_SPEED, waypoints: [], moving: false,
+    animT: 0, animFrame: 0, hopT: 0, blob, visible: true
+  };
+  ACTORS[id] = a;
+  return a;
+}
+function removeActor(id) {
+  const a = ACTORS[id];
+  if (a) { R.scene.remove(a.group); delete ACTORS[id]; }
+}
+function actorSetPos(a, x, z) {
+  a.x = x; a.z = z; a.group.position.set(x, 0, z);
+  if (a.id === 'player') updateCamera(x, z, true);
+}
+
+/* ---- collision ---- */
+function positionFree(x, z, self) {
+  const W = G.world;
+  const r = 0.3;
+  for (const s of [[-r, 0], [r, 0], [0, -r], [0, r]]) {
+    if (!W.walkable(x + s[0], z + s[1])) return false;
+  }
+  for (const c of W.colliders) {
+    if (Math.abs(x - c.x) < c.hw + r && Math.abs(z - c.z) < c.hd + r) return false;
+  }
+  for (const c of W.circles) {
+    if (dist2(x, z, c.x, c.z) < (c.r + r) * (c.r + r)) return false;
+  }
+  return true;
+}
+function moveActor(a, dx, dz, dt) {
+  let moved = false;
+  const nx = a.x + dx * a.speed * dt;
+  if (positionFree(nx, a.z, a)) { a.x = nx; moved = true; }
+  const nz = a.z + dz * a.speed * dt;
+  if (positionFree(a.x, nz, a)) { a.z = nz; moved = true; }
+  if (dx || dz) a.face = Math.atan2(dx, dz);
+  a.group.position.set(a.x, a.group.position.y, a.z);
+  a.group.rotation.y = a.face;
+  return moved;
+}
+function tickActorAnim(a, dt, walking) {
+  const swing = [0, 1, 0, -1];
+  if (walking) {
+    a.animT += dt;
+    if (a.animT > 0.125) { a.animT = 0; a.animFrame = (a.animFrame + 1) % 4; }
+  } else { a.animFrame = 0; }
+  let s = swing[a.animFrame] * 0.55;
+  // low-stamina slump (player only, diegetic tell)
+  let slump = 0;
+  if (a.id === 'player' && G.stamina <= CONFIG.SLUMP_AT) slump = 0.12;
+  if (a.id === 'player' && G.stamina <= CONFIG.SWEAT_AT) slump = 0.2;
+  const u = a.group.userData;
+  u.legs[0].rotation.x = s; u.legs[1].rotation.x = -s;
+  u.arms[0].rotation.x = -s * 0.8; u.arms[1].rotation.x = s * 0.8;
+  a.group.rotation.x = slump * 0.5;
+  if (a.hopT > 0) {                    // tool-use hop
+    a.hopT -= dt;
+    a.group.position.y = Math.max(0, Math.sin((1 - a.hopT / 0.18) * Math.PI) * 0.16);
+    if (a.hopT <= 0) a.group.position.y = 0;
+  }
+}
+// NPC waypoint walking (interpolated, never teleports)
+function tickNPC(a, dt) {
+  if (!a.waypoints.length) { tickActorAnim(a, dt, false); return; }
+  const wp = a.waypoints[0];
+  const dx = wp.x - a.x, dz = wp.z - a.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 0.25) {
+    a.waypoints.shift();
+    if (wp.onArrive) wp.onArrive();
+    tickActorAnim(a, dt, false);
+    return;
+  }
+  const moved = moveActor(a, dx / d, dz / d, dt);
+  if (!moved) {
+    // slide along the obstacle: try both perpendiculars, keep whichever works
+    a.slideDir = a.slideDir || 1;
+    if (!moveActor(a, -dz / d * a.slideDir, dx / d * a.slideDir, dt)) {
+      a.slideDir = -a.slideDir;
+      moveActor(a, -dz / d * a.slideDir, dx / d * a.slideDir, dt);
+    }
+    a.face = Math.atan2(dx, dz);   // keep facing the goal while sliding
+  } else a.slideDir = 1;
+  tickActorAnim(a, dt, true);
+}
+
+/* ---- player ---- */
+function playerRecipe() {
+  return { skin: SKINS[G.look.skin % SKINS.length], hair: HAIRS[G.look.hair % HAIRS.length],
+    shirt: SHIRTS[G.look.shirt % SHIRTS.length] };
+}
+function spawnPlayer(x, z) {
+  removeActor('player');
+  const p = makeActor('player', playerRecipe(), x, z);
+  p.speed = CONFIG.PLAYER_SPEED;
+  return p;
+}
+function player() { return ACTORS.player; }
+
+function facingVector() {
+  const p = player();
+  return { x: Math.sin(p.face), z: Math.cos(p.face) };
+}
+function targetTilePos() {
+  const p = player(), fv = facingVector();
+  return { x: Math.floor(p.x + fv.x * 0.9) + 0.5, z: Math.floor(p.z + fv.z * 0.9) + 0.5 };
+}
+
+/* ---- what does the smart button do right now? ---- */
+function findAction() {
+  const p = player(), fv = facingVector();
+  const W = G.world;
+  const fx = p.x + fv.x * 0.9, fz = p.z + fv.z * 0.9;
+  // villager in front
+  let best = null, bestD = CONFIG.INTERACT_DIST ** 2;
+  for (const id in ACTORS) {
+    if (id === 'player') continue;
+    const a = ACTORS[id];
+    if (!a.visible) continue;
+    const d = dist2(p.x, p.z, a.x, a.z);
+    if (d < bestD) { best = a; bestD = d; }
+  }
+  if (best) return { type: 'talk', npc: best };
+  // forage
+  for (const f of FORAGE_LIVE) {
+    if (dist2(p.x, p.z, f.x, f.z) < 2.6) return { type: 'forage', f };
+  }
+  // bin / mailbox / doors
+  if (dist2(p.x, p.z, W.bin.x, W.bin.z) < 4.4) return { type: 'bin' };
+  if (dist2(p.x, p.z, W.mailbox.x, W.mailbox.z) < 3.2) return { type: 'mail' };
+  for (const d of W.doors) {
+    if (dist2(p.x, p.z, d.x, d.z) < 3.2) return { type: 'door', door: d };
+  }
+  // farm tile
+  const tt = tileAt(fx, fz);
+  if (tt) return { type: 'tile', tt };
+  return null;
+}
+
+function updateTargetHighlight(time) {
+  const p = player();
+  if (!p || !R.target) return;
+  const act = findAction();
+  const tp = targetTilePos();
+  const onField = tileAt(tp.x, tp.z);
+  const show = G.mode === 'play' && !G.uiOpen && onField;
+  R.target.visible = !!show;
+  if (show) {
+    R.target.position.x = tp.x; R.target.position.z = tp.z;
+    R.target.material.opacity = 0.18 + Math.sin(time * 2.4) * 0.08;
+    let valid = true;
+    if (onField) {
+      const t = onField.t;
+      if (t.obj === 'boulder' || t.obj === 'log') valid = false;   // tool-gated year 1
+    }
+    R.target.material.color.set(valid ? 0xffffff : 0xE07060);
+  }
+  return act;
+}
+/* ================================ ITEMS ================================== */
+const ITEMS = {};
+function buildItems() {
+  for (const id in CONFIG.CROPS) {
+    const c = CONFIG.CROPS[id];
+    ITEMS[id] = { name: c.name, icon: c.icon, sell: c.sell, enterprise: c.name };
+    ITEMS['seed_' + id] = { name: c.name + ' Seeds', icon: '🌱', sell: 0, seedOf: id };
+  }
+  for (const season in CONFIG.FORAGE) {
+    for (const f of CONFIG.FORAGE[season]) {
+      ITEMS[f.id] = { name: f.name, icon: f.icon, sell: f.sell, enterprise: 'Foraging' };
+    }
+  }
+  ITEMS.coat = { name: 'Winter Coat', icon: '🧥', sell: 0, enterprise: 'Supplies' };
+}
+function addItem(id, n) {
+  G.inventory[id] = (G.inventory[id] || 0) + (n || 1);
+  if (!G.heldItem && ITEMS[id]) G.heldItem = id;
+  updateHUD();
+}
+function takeItem(id, n) {
+  n = n || 1;
+  if ((G.inventory[id] || 0) < n) return false;
+  G.inventory[id] -= n;
+  if (G.inventory[id] <= 0) {
+    delete G.inventory[id];
+    if (G.heldItem === id) G.heldItem = null;
+  }
+  updateHUD();
+  return true;
+}
+
+/* ================================ AUDIO ================================== */
+const AU = { ctx: null, vol: 0.5 };
+function audioCtx() {
+  if (!AU.ctx) { try { AU.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  return AU.ctx;
+}
+function sfx(name) {
+  const ctx = audioCtx();
+  if (!ctx || AU.vol <= 0) return;
+  const t = ctx.currentTime;
+  const play = (type, f0, f1, dur, vol, delay) => {
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = type; o.frequency.setValueAtTime(f0, t + (delay || 0));
+    o.frequency.linearRampToValueAtTime(f1, t + (delay || 0) + dur);
+    g.gain.setValueAtTime(vol * AU.vol, t + (delay || 0));
+    g.gain.exponentialRampToValueAtTime(0.001, t + (delay || 0) + dur);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(t + (delay || 0)); o.stop(t + (delay || 0) + dur + 0.02);
+  };
+  switch (name) {
+    case 'blip': play('square', 620, 660, 0.04, 0.06); break;
+    case 'thud': play('sine', 130, 60, 0.14, 0.32); break;
+    case 'plink': play('sine', 700, 380, 0.16, 0.16); break;
+    case 'pick': play('sine', 520, 780, 0.1, 0.14); break;
+    case 'creak': play('sawtooth', 180, 240, 0.2, 0.06); break;
+    case 'coin': play('square', 880, 1180, 0.09, 0.1); play('square', 1180, 1560, 0.09, 0.08, 0.08); break;
+    case 'kachunk': play('square', 220, 160, 0.07, 0.14); play('square', 140, 90, 0.1, 0.16, 0.09); break;
+    case 'chime': play('sine', 780, 780, 0.3, 0.14); play('sine', 1170, 1170, 0.4, 0.12, 0.12); play('sine', 1560, 1560, 0.5, 0.09, 0.24); break;
+    case 'sleep': play('sine', 440, 220, 0.5, 0.1); break;
+  }
+}
+
+/* ============================== TIME & SIM =============================== */
+function hoursPerSec() {
+  const season = seasonOf(G.day);
+  return 18 / (CONFIG.DAY_MINUTES[season] * 60);
+}
+function simPaused() {
+  return G.mode !== 'play' || !!G.uiOpen;
+}
+function tickTime(dt) {
+  if (simPaused()) return;
+  G.hour += hoursPerSec() * dt;
+  if (G.hour >= CONFIG.DAY_END) {
+    G.hour = CONFIG.DAY_END - 0.01;
+    passOut();
+  }
+}
+
+function staminaFloor() { return G.day < 12 ? CONFIG.STAMINA_Y1_FLOOR : 0; }
+function spendStamina(n) {
+  G.stamina = Math.max(staminaFloor(), G.stamina - n);
+}
+function staminaWord() {
+  if (G.stamina > 75) return 'Rested';
+  if (G.stamina > 50) return 'Fine';
+  if (G.stamina > 25) return 'Tired';
+  return 'Exhausted';
+}
+
+function jline(line) { (G.dayFlags.journal = G.dayFlags.journal || []).push(line); }
+
+/* ---- the sacred 6:00 rollover, in order ---- */
+function rollover(newDay) {
+  const prevDay = G.day;
+  // 1. bin payout
+  let binTotal = 0;
+  const byEnterprise = {};
+  for (const s of G.todayShipped) {
+    binTotal += s.value;
+    byEnterprise[s.enterprise] = (byEnterprise[s.enterprise] || 0) + s.value;
+  }
+  if (binTotal > 0) {
+    if (G.network.connected.general) {
+      G.money += binTotal;
+      for (const e in byEnterprise) G.ledger.entries.push({ day: prevDay, amount: byEnterprise[e], enterprise: e, note: 'Shipment (settled instantly)' });
+      G.dayFlags.settledInstant = binTotal;
+      jline('The shipment settled overnight — $' + binTotal + ' in the account by sunup. Still not used to that.');
+    } else {
+      const arrive = prevDay + CONFIG.CHECK_LAG_DAYS;
+      G.pendingChecks.push({ amount: binTotal, arriveDay: arrive, label: 'Shipment check', enterprises: byEnterprise });
+      G.dayFlags.checkMailed = { amount: binTotal, arrive };
+      jline('Shipped $' + binTotal + ' worth. The check is in the mail — two days, they say.');
+    }
+  }
+  G.todayShipped = [];
+  // 2. check-mail processing
+  const arrived = [];
+  G.pendingChecks = G.pendingChecks.filter(c => {
+    if (c.arriveDay <= newDay) { arrived.push(c); return false; }
+    return true;
+  });
+  for (const c of arrived) {
+    G.money += c.amount;
+    for (const e in (c.enterprises || {})) G.ledger.entries.push({ day: newDay, amount: c.enterprises[e], enterprise: e, note: 'Check arrived' });
+    G.mail.push({ day: newDay, from: 'Valley Post', title: 'A check for $' + c.amount,
+      body: 'Your ' + c.label.toLowerCase() + ' for $' + c.amount + ' has cleared. Thank you for your patience.', read: false });
+    G.flags.lastCheckAmount = c.amount;
+  }
+  // 3. crop growth
+  for (const t of G.world.tiles) {
+    if (!t.crop || t.dead) continue;
+    const c = CONFIG.CROPS[t.crop];
+    if (t.watered) { t.grown = Math.min(c.days, t.grown + 1); t.dry = 0; }
+    else if (t.grown < c.days) {
+      t.dry++;
+      if (t.dry >= 2) { t.dead = true; G.dayFlags.cropDied = true; }
+    }
+  }
+  // 4. watered flags clear (unless rain)
+  const newWeather = weatherFor(newDay);
+  for (const t of G.world.tiles) {
+    t.watered = newWeather === 'rain';
+  }
+  // 5. weather
+  G.weather = newWeather;
+  // 6-7. respawns + villager schedules  (story hook places the cast)
+  // 8. mail / festival / arc flags       (story hook)
+  // 9. contract fulfillment — phase 3
+  const seasonChanged = seasonOf(newDay) !== seasonOf(prevDay);
+  G.day = newDay;
+  G.hour = CONFIG.DAY_START;
+  G.stamina = G.collapsedYesterday ? 62 : 100;
+  G.collapsedYesterday = false;
+  if (seasonChanged) { paintGround(seasonOf(newDay)); }
+  TL.dirty = true;
+  // 10. autosave (in-memory slot)
+  G.autosave = saveEncode();
+  // 11. yesterday's Journal entry finalizes
+  finalizeJournal(prevDay);
+  G.dayFlags = {};
+  spawnForage();
+  updateHUD();
+}
+
+function finalizeJournal(day) {
+  const lines = (G.dayFlags.journal || []).slice();
+  if (G.dayFlags.cropDied) lines.push('Lost a seedling to dry soil. Two days without water is one too many.');
+  if (!lines.length) lines.push('A quiet day. The valley keeps its own time.');
+  const season = seasonOf(day), dos = dayOfSeason(day);
+  G.journal.push({ day, header: season + ' ' + dos + (isRestday(day) ? ' · Restday' : '') + ', Year ' + yearOf(day), lines });
+}
+
+/* ---- sleep & collapse ---- */
+function passOut() {
+  if (G.mode !== 'play') return;
+  G.collapsedYesterday = true;
+  jline('I don’t remember getting to bed. Note to self: beds are for walking to, not falling into.');
+  doSleep(true);
+}
+function doSleep(forced) {
+  G.mode = 'sleep';
+  sfx('sleep');
+  fadeOut(() => {
+    const next = G.day + 1;
+    rollover(next);
+    STORY.onDayStart(next);
+    const W = G.world;
+    const p = player();
+    actorSetPos(p, W.house.x, W.house.z + W.house.d / 2 + 1.6);
+    p.face = Math.PI;
+    updateCamera(p.x, p.z, true);
+    applyGrade();
+    fadeIn(() => { if (G.mode === 'sleep') G.mode = 'play'; });
+  });
+}
+
+/* ---- tile & world actions (the smart button) ---- */
+function performAction() {
+  const act = findAction();
+  if (!act) return;
+  const p = player();
+  switch (act.type) {
+    case 'talk': STORY.talkTo(act.npc); break;
+    case 'forage': {
+      const f = act.f;
+      addItem(f.item.id, 1);
+      G.dayFlags['picked_' + Math.round(f.x) + '_' + Math.round(f.z)] = true;
+      R.worldGroup.remove(f.mesh);
+      FORAGE_LIVE.splice(FORAGE_LIVE.indexOf(f), 1);
+      sfx('pick');
+      toast('Picked ' + f.item.name);
+      if (!G.flags.firstForage) { G.flags.firstForage = true; jline('Found ' + f.item.name.toLowerCase() + ' growing wild. The valley feeds you, if you look.'); }
+      break;
+    }
+    case 'bin': shipHeld(); break;
+    case 'mail': openMail(); break;
+    case 'door': STORY.enterDoor(act.door); break;
+    case 'tile': doTileAction(act.tt); break;
+  }
+}
+function hop() { const p = player(); p.hopT = 0.18; }
+
+function doTileAction(tt) {
+  const t = tt.t;
+  const held = G.heldItem;
+  const heldSeed = held && ITEMS[held] && ITEMS[held].seedOf;
+  if (t.obj === 'weed') { t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(CONFIG.STAMINA_COST.sickle); hop(); sfx('thud'); firstClear(); }
+  else if (t.obj === 'rock') { t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(CONFIG.STAMINA_COST.hammer); hop(); sfx('thud'); firstClear(); }
+  else if (t.obj === 'stump') { t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(CONFIG.STAMINA_COST.axe); hop(); sfx('thud'); firstClear(); }
+  else if (t.obj === 'boulder' || t.obj === 'log') { toast('Too big for your tools — Hetta could help, come spring.'); return; }
+  else if (t.crop && t.dead) { t.crop = null; t.grown = 0; t.dead = false; hop(); sfx('thud'); toast('Cleared the withered plant.'); }
+  else if (t.crop && cropVisualStage(t) === 3) {
+    addItem(t.crop, 1); t.crop = null; t.grown = 0;
+    hop(); sfx('pick');
+    G.dayFlags.harvested = (G.dayFlags.harvested || 0) + 1;
+    if (!G.flags.firstHarvest) { G.flags.firstHarvest = true; jline('First harvest. They’re small and a little lopsided and I grew them.'); }
+  }
+  else if (t.crop) { t.watered = true; spendStamina(CONFIG.STAMINA_COST.can); hop(); sfx('plink'); }
+  else if (t.s === 'till' && heldSeed) {
+    const crop = CONFIG.CROPS[heldSeed];
+    if (!crop.seasons.includes(seasonOf(G.day))) { toast('Not the season for ' + crop.name.toLowerCase() + '.'); return; }
+    if (!takeItem(held, 1)) return;
+    t.crop = heldSeed; t.grown = 0; t.dead = false; t.dry = 0;
+    if (G.weather === 'rain') t.watered = true;
+    hop(); sfx('plink');
+    if (!G.flags.firstPlant) { G.flags.firstPlant = true; jline('Put the first seeds in the ground. Now we both wait.'); }
+  }
+  else if (t.s === 'till') { t.watered = true; spendStamina(CONFIG.STAMINA_COST.can); hop(); sfx('plink'); }
+  else if (t.s === 'clear') { t.s = 'till'; spendStamina(CONFIG.STAMINA_COST.hoe); hop(); sfx('thud'); }
+  TL.dirty = true;
+  STORY.checkObjectives();
+}
+function firstClear() {
+  if (!G.flags.firstClear) { G.flags.firstClear = true; jline('Cleared the first stretch of the field. The land remembers being a farm.'); }
+}
+
+function shipHeld() {
+  const held = G.heldItem;
+  if (!held || !ITEMS[held] || !ITEMS[held].sell) { toast('Hold something sellable to ship it.'); return; }
+  const n = G.inventory[held] || 0;
+  if (!n) return;
+  const item = ITEMS[held];
+  const value = item.sell * n;
+  G.todayShipped.push({ id: held, name: item.name, count: n, value, enterprise: item.enterprise });
+  takeItem(held, n);
+  sfx('creak');
+  if (G.network.connected.general) toast('Shipped ' + n + '× ' + item.name + ' — $' + value + ' settles tonight.');
+  else toast('Shipped ' + n + '× ' + item.name + ' — check for $' + value + ' in ' + CONFIG.CHECK_LAG_DAYS + ' days.');
+  G.dayFlags.shippedAny = true;
+  STORY.checkObjectives();
+}
+
+function spend(amount, enterprise, note) {
+  if (G.money < amount) return false;
+  G.money -= amount;
+  G.ledger.entries.push({ day: G.day, amount: -amount, enterprise: enterprise || 'Supplies', note: note || '' });
+  updateHUD();
+  return true;
+}
+
+/* ================================ SAVE =================================== */
+function saveEncode() {
+  const tiles = G.world.tiles.map(t =>
+    [t.s === 'wild' ? 0 : t.s === 'clear' ? 1 : 2, t.obj || '', t.crop || '', t.grown, t.watered ? 1 : 0, t.dry, t.dead ? 1 : 0].join('.'));
+  const data = {
+    v: 1, seed: G.world.seed, day: G.day, hour: Math.min(G.hour, 23),
+    money: G.money, stamina: G.stamina,
+    inv: G.inventory, held: G.heldItem, checks: G.pendingChecks,
+    shipped: G.todayShipped, mail: G.mail, journal: G.journal,
+    flags: G.flags, ledger: G.ledger, network: G.network,
+    farmName: G.farmName, playerName: G.playerName, look: G.look,
+    hearts: G.hearts, tiles
+  };
+  return b64encode(JSON.stringify(data));
+}
+function saveDecode(code) {
+  const data = JSON.parse(b64decode(code.trim()));
+  if (!data || data.v !== 1) throw new Error('bad save');
+  return data;
+}
+function applySave(data) {
+  G.world = generateWorld(data.seed);
+  const OBJS = { '': null };
+  data.tiles.forEach((s, i) => {
+    const [st, obj, crop, grown, watered, dry, dead] = s.split('.');
+    const t = G.world.tiles[i];
+    t.s = st === '0' ? 'wild' : st === '1' ? 'clear' : 'till';
+    t.obj = obj || null; t.crop = crop || null;
+    t.grown = +grown; t.watered = watered === '1'; t.dry = +dry; t.dead = dead === '1';
+  });
+  G.day = data.day; G.hour = data.hour; G.money = data.money; G.stamina = data.stamina;
+  G.inventory = data.inv || {}; G.heldItem = data.held;
+  G.pendingChecks = data.checks || []; G.todayShipped = data.shipped || [];
+  G.mail = data.mail || []; G.journal = data.journal || [];
+  G.flags = data.flags || {}; G.ledger = data.ledger || { unlocked: false, entries: [] };
+  G.network = data.network || { connected: {} };
+  G.farmName = data.farmName; G.playerName = data.playerName; G.look = data.look || G.look;
+  G.hearts = data.hearts || {};
+  G.weather = weatherFor(G.day);
+  location.hash = '#s=' + data.seed;
+  buildWorldScene();
+  for (const id in ACTORS) removeActor(id);
+  const W = G.world;
+  spawnPlayer(W.house.x, W.house.z + W.house.d / 2 + 1.6);
+  STORY.onDayStart(G.day, true);
+  spawnForage();
+  updateCamera(player().x, player().z, true);
+  applyGrade();
+  if (R.glyphs.general) R.glyphs.general.visible = !!G.network.connected.general;
+  updateHUD();
+  G.mode = 'play';
+}
+function downloadSave() {
+  const code = saveEncode();
+  const blob = new Blob([code], { type: 'application/octet-stream' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = (G.farmName || 'almanac').replace(/\s+/g, '_').toLowerCase() + '_y' + yearOf(G.day) + '.almanac';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+/* ================================= UI ==================================== */
+// DOM builders — all dynamic text goes through textContent (no innerHTML).
+function el(tag, cls, text) {
+  const d = document.createElement(tag);
+  if (cls) d.className = cls;
+  if (text != null) d.textContent = text;
+  return d;
+}
+function clearEl(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+
+function toast(msg, ms) {
+  const t = $('toast');
+  t.textContent = msg; t.style.opacity = 1;
+  clearTimeout(t._h);
+  t._h = setTimeout(() => { t.style.opacity = 0; }, ms || 2200);
+}
+function fadeOut(cb) { $('fade').style.opacity = 1; setTimeout(cb, 650); }
+function fadeIn(cb) { $('fade').style.opacity = 0; setTimeout(() => cb && cb(), 650); }
+
+const WEATHER_ICON = { sun: '☀', cloud: '☁', rain: '🌧', snow: '❄' };
+function updateHUD() {
+  const season = seasonOf(G.day), dos = dayOfSeason(G.day);
+  $('hudDate').textContent = season + ' ' + dos + ', Year ' + yearOf(G.day) +
+    (isRestday(G.day) ? ' · Restday' : '');
+  $('hudTime').textContent = fmtHour(G.hour) + ' · ' + (WEATHER_ICON[G.weather] || '') + ' ' + G.weather;
+  $('hudMoney').textContent = '$' + G.money;
+  const held = G.heldItem && ITEMS[G.heldItem];
+  $('heldIcon').textContent = held ? held.icon : '✋';
+  $('heldName').textContent = held ? held.name : '';
+  $('heldCount').textContent = held ? (G.inventory[G.heldItem] || '') : '';
+  if (R.mailFlag) R.mailFlag.visible = G.mail.some(m => !m.read);
+}
+function setObjective(text) {
+  G.flags.objective = text;
+  const o = $('objective');
+  o.textContent = text || '';
+  o.style.display = text && !G.hideHUD ? 'block' : 'none';
+}
+
+/* ---- portraits: layered-shape busts (placeholder fidelity for phase 1) ---- */
+function drawPortrait(rec) {
+  const c = $('dlgPortrait'), ctx = c.getContext('2d');
+  ctx.clearRect(0, 0, 84, 84);
+  ctx.fillStyle = '#E8DFC4'; ctx.fillRect(0, 0, 84, 84);
+  ctx.fillStyle = rec.shirt;
+  ctx.beginPath(); ctx.ellipse(42, 84, 30, 26, 0, Math.PI, 0); ctx.fill();
+  ctx.fillStyle = rec.skin;
+  ctx.beginPath(); ctx.arc(42, 42, 24, 0, 7); ctx.fill();
+  ctx.fillStyle = rec.hair;
+  ctx.beginPath(); ctx.arc(42, 36, 26, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
+  if (rec.long) { ctx.fillRect(16, 36, 8, 30); ctx.fillRect(60, 36, 8, 30); }
+  if (rec.hat) {
+    ctx.fillStyle = rec.hat;
+    ctx.fillRect(14, 18, 56, 8); ctx.fillRect(26, 6, 32, 14);
+  }
+  ctx.fillStyle = '#2E2620';
+  ctx.beginPath(); ctx.arc(34, 44, 2.6, 0, 7); ctx.arc(50, 44, 2.6, 0, 7); ctx.fill();
+}
+
+/* ---- dialogue (typewriter + blip) ---- */
+const DLG = { queue: [], active: false, revealing: false, txt: '', shown: 0, cb: null, timer: null };
+function say(lines, cb) {
+  for (const l of lines) DLG.queue.push(typeof l === 'string' ? { who: '', text: l } : l);
+  DLG.cb = cb || DLG.cb;
+  if (!DLG.active) nextDialogue();
+}
+function nextDialogue() {
+  if (!DLG.queue.length) {
+    DLG.active = false;
+    $('dlg').style.display = 'none';
+    if (G.uiOpen === 'dialogue') G.uiOpen = null;
+    const cb = DLG.cb; DLG.cb = null;
+    if (cb) cb();
+    return;
+  }
+  DLG.active = true;
+  if (!G.uiOpen) G.uiOpen = 'dialogue';
+  const line = DLG.queue.shift();
+  const rec = line.who && CAST[line.who];
+  $('dlgName').textContent = rec ? rec.name : (line.who === 'player' ? G.playerName : '');
+  $('dlgPortrait').style.display = rec ? 'block' : 'none';
+  if (rec) drawPortrait(rec);
+  DLG.txt = line.text; DLG.shown = 0; DLG.revealing = true;
+  $('dlg').style.display = 'block';
+  $('dlgText').textContent = '';
+  clearInterval(DLG.timer);
+  DLG.timer = setInterval(() => {
+    DLG.shown += 2;
+    $('dlgText').textContent = DLG.txt.slice(0, DLG.shown);
+    if (DLG.shown % 6 < 2) sfx('blip');
+    if (DLG.shown >= DLG.txt.length) { DLG.revealing = false; clearInterval(DLG.timer); }
+  }, 24);
+}
+function advanceDialogue() {
+  if (!DLG.active) return;
+  if (DLG.revealing) {
+    clearInterval(DLG.timer); DLG.revealing = false;
+    $('dlgText').textContent = DLG.txt;
+  } else nextDialogue();
+}
+
+/* ---- choices ---- */
+const CH = { open: false, opts: [], sel: 0, cb: null };
+function showChoice(opts, cb) {
+  CH.open = true; CH.opts = opts; CH.sel = 0; CH.cb = cb;
+  const box = $('choices');
+  clearEl(box); box.style.display = 'flex';
+  opts.forEach((o, i) => {
+    const b = el('button', 'choiceBtn' + (i === 0 ? ' sel' : ''), o);
+    b.onclick = () => pickChoice(i);
+    box.appendChild(b);
+  });
+}
+function moveChoice(d) {
+  if (!CH.open) return;
+  CH.sel = (CH.sel + d + CH.opts.length) % CH.opts.length;
+  [...$('choices').children].forEach((b, i) => b.classList.toggle('sel', i === CH.sel));
+  sfx('blip');
+}
+function pickChoice(i) {
+  CH.open = false;
+  $('choices').style.display = 'none';
+  const cb = CH.cb; CH.cb = null;
+  cb && cb(i);
+}
+
+/* ---- radial ring (hold E) ---- */
+const RAD = { open: false, items: [], sel: -1 };
+function openRadial() {
+  const items = [{ id: null, icon: '✋', name: 'Hands' }];
+  for (const id in G.inventory) {
+    if (ITEMS[id]) items.push({ id, icon: ITEMS[id].icon, name: ITEMS[id].name });
+    if (items.length >= 9) break;
+  }
+  RAD.open = true; RAD.items = items; RAD.sel = -1;
+  G.uiOpen = 'radial';
+  const box = $('radial');
+  clearEl(box); box.style.display = 'block';
+  const ui = $('ui');
+  const cx = ui.clientWidth / 2, cy = ui.clientHeight / 2, r = Math.min(cx, cy) * 0.4;
+  box.style.left = cx + 'px'; box.style.top = cy + 'px';
+  items.forEach((it, i) => {
+    const a = i / items.length * Math.PI * 2 - Math.PI / 2;
+    const d = el('div', 'radItem', it.icon);
+    d.style.left = Math.cos(a) * r + 'px';
+    d.style.top = Math.sin(a) * r + 'px';
+    d.appendChild(el('div', 'radLbl', it.name));
+    box.appendChild(d);
+  });
+}
+function radialAim(dx, dz) {
+  if (!RAD.open || (!dx && !dz)) return;
+  const ang = Math.atan2(dz, dx) + Math.PI / 2;
+  let best = 0, bd = 99;
+  RAD.items.forEach((it, i) => {
+    const a = i / RAD.items.length * Math.PI * 2;
+    const diff = Math.abs(((ang - a) % (Math.PI * 2) + Math.PI * 3) % (Math.PI * 2) - Math.PI);
+    if (diff < bd) { bd = diff; best = i; }
+  });
+  if (best !== RAD.sel) {
+    RAD.sel = best;
+    [...$('radial').children].forEach((c, i) => c.classList.toggle('sel', i === best));
+    sfx('blip');
+  }
+}
+function closeRadial(select) {
+  if (!RAD.open) return;
+  if (select && RAD.sel >= 0) { G.heldItem = RAD.items[RAD.sel].id; updateHUD(); }
+  RAD.open = false;
+  $('radial').style.display = 'none';
+  if (G.uiOpen === 'radial') G.uiOpen = null;
+}
+
+/* ---- Tab menu ---- */
+const MENU = { open: false, tab: 'Inventory' };
+const MENU_TABS = ['Inventory', 'Villagers', 'Ledger', 'Journal', 'Map', 'Save', 'Settings'];
+function openMenu(tab) {
+  MENU.open = true; MENU.tab = tab || MENU.tab;
+  G.uiOpen = 'menu';
+  $('menu').style.display = 'block';
+  renderMenu();
+}
+function closeMenu() {
+  MENU.open = false;
+  $('menu').style.display = 'none';
+  if (G.uiOpen === 'menu') G.uiOpen = null;
+}
+function renderMenu() {
+  const row = $('tabRow');
+  clearEl(row);
+  for (const t of MENU_TABS) {
+    const b = el('button', 'tabBtn' + (t === MENU.tab ? ' on' : '') + (t === 'Ledger' ? ' ledger' : ''), t);
+    b.onclick = () => { MENU.tab = t; renderMenu(); };
+    row.appendChild(b);
+  }
+  const body = $('tabBody');
+  clearEl(body);
+  const T = MENU.tab;
+  if (T === 'Inventory') renderInventoryTab(body);
+  else if (T === 'Villagers') renderVillagersTab(body);
+  else if (T === 'Ledger') renderLedgerTab(body);
+  else if (T === 'Journal') renderJournalTab(body);
+  else if (T === 'Map') renderMapTab(body);
+  else if (T === 'Save') renderSaveTab(body);
+  else if (T === 'Settings') renderSettingsTab(body);
+}
+function renderInventoryTab(body) {
+  const info = el('div');
+  const b1 = el('b', null, G.farmName);
+  info.appendChild(b1);
+  info.appendChild(document.createTextNode(' · $' + G.money + ' · Feeling: '));
+  info.appendChild(el('b', null, staminaWord()));
+  if (G.pendingChecks.length) {
+    info.appendChild(el('br'));
+    info.appendChild(document.createTextNode('Checks in the mail: ' +
+      G.pendingChecks.map(c => '$' + c.amount + ' (arrives ' + dayName(c.arriveDay) + ')').join(', ')));
+  }
+  info.style.marginBottom = '10px';
+  body.appendChild(info);
+  const grid = el('div', 'invGrid');
+  const ids = Object.keys(G.inventory);
+  if (!ids.length) grid.appendChild(el('i', null, 'Empty pockets.'));
+  for (const id of ids) {
+    const it = ITEMS[id];
+    if (!it) continue;
+    const cell = el('div', 'invCell' + (G.heldItem === id ? ' sel' : ''));
+    cell.appendChild(el('div', 'invIcon', it.icon));
+    cell.appendChild(el('div', 'invName', it.name));
+    cell.appendChild(el('div', 'invCt', String(G.inventory[id])));
+    cell.onclick = () => { G.heldItem = id; updateHUD(); renderMenu(); };
+    grid.appendChild(cell);
+  }
+  body.appendChild(grid);
+}
+function renderVillagersTab(body) {
+  const met = Object.keys(G.hearts);
+  if (!met.length) { body.appendChild(el('i', null, 'You haven’t really met anyone yet.')); return; }
+  for (const id of met) {
+    const rec = CAST[id];
+    if (!rec) continue;
+    const d = el('div');
+    d.appendChild(el('b', null, rec.name + '  '));
+    const hearts = G.hearts[id] || 0;
+    d.appendChild(document.createTextNode('♥'.repeat(hearts)));
+    const dim = el('span', null, '♥'.repeat(Math.max(0, 10 - hearts)));
+    dim.style.opacity = '0.25';
+    d.appendChild(dim);
+    d.style.marginBottom = '4px';
+    body.appendChild(d);
+  }
+}
+function renderLedgerTab(body) {
+  if (!G.ledger.unlocked) { body.appendChild(el('i', null, 'A place for a book you don’t have yet.')); return; }
+  const head = el('div', null, 'THE LEDGER — every dollar, tagged');
+  head.style.color = 'var(--green)'; head.style.fontWeight = 'bold'; head.style.marginBottom = '8px';
+  body.appendChild(head);
+  const by = {};
+  for (const e of G.ledger.entries) by[e.enterprise] = (by[e.enterprise] || 0) + e.amount;
+  const keys = Object.keys(by).sort((a, b) => by[b] - by[a]);
+  if (!keys.length) { body.appendChild(el('i', null, 'Nothing tagged yet. Ship something.')); return; }
+  const table = el('table');
+  table.style.width = '100%';
+  for (const k of keys) {
+    const tr = el('tr');
+    tr.appendChild(el('td', null, k));
+    const td = el('td', null, (by[k] >= 0 ? '+$' + by[k] : '−$' + (-by[k])));
+    td.style.textAlign = 'right'; td.style.fontWeight = 'bold';
+    td.style.color = by[k] >= 0 ? 'var(--green)' : '#a55';
+    tr.appendChild(td);
+    table.appendChild(tr);
+  }
+  body.appendChild(table);
+}
+function renderJournalTab(body) {
+  if (!G.journal.length) { body.appendChild(el('i', null, 'The first page is always the hardest.')); return; }
+  const btn = el('button', 'uiBtn', 'Export journal (.txt)');
+  btn.onclick = exportJournal;
+  body.appendChild(btn);
+  for (let i = G.journal.length - 1; i >= 0; i--) {
+    const e = G.journal[i];
+    const d = el('div');
+    d.style.marginBottom = '10px';
+    d.appendChild(el('b', null, e.header));
+    for (const line of e.lines) { d.appendChild(el('br')); d.appendChild(document.createTextNode(line)); }
+    body.appendChild(d);
+  }
+}
+function renderMapTab(body) {
+  const c = document.createElement('canvas');
+  c.width = 480; c.height = 360; c.style.width = '100%';
+  c.style.border = '2px solid var(--border)'; c.style.borderRadius = '8px';
+  drawMap(c.getContext('2d'));
+  body.appendChild(c);
+  body.appendChild(el('div', null, 'Shop hours: 9:00–17:00, shut Restdays. The Bluebird pours till late.'));
+}
+function renderSaveTab(body) {
+  body.appendChild(el('b', null, 'Save code — your life in the valley, portable.'));
+  const out = el('textarea', 'saveBox');
+  out.readOnly = true; out.value = saveEncode();
+  body.appendChild(out);
+  const bCopy = el('button', 'uiBtn', 'Copy code');
+  bCopy.onclick = () => { copyText(out.value); toast('Save code copied.'); };
+  const bDl = el('button', 'uiBtn', 'Download .almanac');
+  bDl.onclick = downloadSave;
+  const bSeed = el('button', 'uiBtn', 'Copy valley link');
+  bSeed.onclick = () => {
+    copyText(location.origin + location.pathname + '#s=' + G.world.seed);
+    toast('Valley link copied — seed ' + G.world.seed);
+  };
+  body.appendChild(bCopy); body.appendChild(bDl); body.appendChild(bSeed);
+  body.appendChild(el('br')); body.appendChild(el('br'));
+  body.appendChild(el('b', null, 'Load'));
+  const inp = el('textarea', 'saveBox');
+  inp.placeholder = 'Paste a save code…';
+  body.appendChild(inp);
+  const bLoad = el('button', 'uiBtn', 'Load code');
+  bLoad.onclick = () => tryLoad(inp.value);
+  const file = document.createElement('input');
+  file.type = 'file'; file.accept = '.almanac'; file.style.display = 'none';
+  file.onchange = e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const rd = new FileReader();
+    rd.onload = () => tryLoad(rd.result);
+    rd.readAsText(f);
+  };
+  const bFile = el('button', 'uiBtn', 'Load .almanac file');
+  bFile.onclick = () => file.click();
+  body.appendChild(bLoad); body.appendChild(bFile); body.appendChild(file);
+}
+function renderSettingsTab(body) {
+  body.appendChild(el('b', null, 'Volume '));
+  const vol = document.createElement('input');
+  vol.type = 'range'; vol.min = 0; vol.max = 100; vol.value = Math.round(AU.vol * 100);
+  vol.oninput = () => { AU.vol = vol.value / 100; };
+  body.appendChild(vol);
+  body.appendChild(el('br')); body.appendChild(el('br'));
+  const lbl = el('label');
+  const cb = document.createElement('input');
+  cb.type = 'checkbox'; cb.checked = !!G.flags.colorblind;
+  cb.onchange = () => { G.flags.colorblind = cb.checked; };
+  lbl.appendChild(cb);
+  lbl.appendChild(document.createTextNode(' Colorblind watered-tile pattern (full support in phase 2)'));
+  body.appendChild(lbl);
+  body.appendChild(el('br')); body.appendChild(el('br'));
+  body.appendChild(el('i', null, 'Seed ' + G.world.seed + ' · ' + G.world.townName + (G.world.coastal ? ' (coastal)' : '')));
+}
+function dayName(day) { return seasonOf(day) + ' ' + dayOfSeason(day); }
+function copyText(text) {
+  if (navigator.clipboard) navigator.clipboard.writeText(text).catch(() => {});
+}
+function tryLoad(code) {
+  try {
+    const data = saveDecode(code);
+    closeMenu();
+    fadeOut(() => { applySave(data); fadeIn(); toast('Welcome back to ' + G.world.townName + '.'); });
+  } catch (e) { toast('That code didn’t take. Check the paste?'); }
+}
+function exportJournal() {
+  let txt = 'THE ALMANAC OF ' + G.farmName.toUpperCase() + '\n' + G.world.townName + ' · seed ' + G.world.seed + '\n\n';
+  for (const e of G.journal) txt += e.header + '\n' + e.lines.map(l => '  ' + l).join('\n') + '\n\n';
+  const blob = new Blob([txt], { type: 'text/plain' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'almanac_journal.txt';
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+function drawMap(ctx) {
+  const W = G.world, P = CONFIG.PALETTE;
+  ctx.fillStyle = P.cream; ctx.fillRect(0, 0, 480, 360);
+  ctx.fillStyle = P.stone; ctx.fillRect(0, 0, 480, zc(-74));
+  if (W.coastal) { ctx.fillStyle = P.water; ctx.fillRect(0, zc(W.oceanZ), 480, 360 - zc(W.oceanZ)); }
+  paintPathLine(ctx, W.river, W.riverW, P.water);
+  ctx.fillStyle = P.water;
+  ctx.beginPath(); ctx.ellipse(wc(W.pool.x), zc(W.pool.z), W.pool.r * 2, W.pool.r * 1.8, 0, 0, 7); ctx.fill();
+  for (const p of W.paths) paintPathLine(ctx, p.pts, p.w * 0.8, P.path);
+  ctx.fillStyle = '#C9B283';
+  ctx.fillRect(wc(W.field.x0), zc(W.field.z0), W.field.w * 2, W.field.h * 2);
+  ctx.strokeStyle = P.border; ctx.lineWidth = 2;
+  ctx.strokeRect(wc(W.field.x0), zc(W.field.z0), W.field.w * 2, W.field.h * 2);
+  let flip = false;
+  const dot = (x, z, label, color) => {
+    ctx.fillStyle = color || P.roofRed;
+    ctx.fillRect(wc(x) - 5, zc(z) - 5, 10, 10);
+    ctx.fillStyle = P.ink; ctx.font = 'bold 10px Trebuchet MS'; ctx.textAlign = 'center';
+    if (label) ctx.fillText(label, wc(x), zc(z) + (flip ? 18 : -8));
+    flip = !flip;
+  };
+  dot(W.house.x, W.house.z, G.farmName);
+  for (const s of W.shops) if (s.name) dot(s.x, s.z, s.name.split(' ')[0], s.roof === 'teal' ? P.roofTeal : P.roofRed);
+  dot(W.gazebo.x, W.gazebo.z, 'Square', P.wood);
+  dot(W.bench.x, W.bench.z, 'The Shore', P.wood);
+  dot(W.marker.x, W.marker.z, 'The Marker', P.stone);
+  ctx.fillStyle = P.ink; ctx.font = 'bold 14px Trebuchet MS'; ctx.textAlign = 'center';
+  ctx.fillText(W.townName, wc(W.town.x), zc(-40));
+}
+
+/* ---- mail ---- */
+function openMail() {
+  if (!G.mail.length) { say(['The mailbox is empty. The hinge squeaks anyway.']); return; }
+  const unread = G.mail.filter(m => !m.read);
+  const toShow = unread.length ? unread : G.mail.slice(-1);
+  sfx('creak');
+  const lines = [];
+  for (const m of toShow) {
+    lines.push('✉ ' + m.from + ' — "' + m.title + '"');
+    lines.push(m.body);
+    m.read = true;
+  }
+  say(lines, () => { updateHUD(); STORY.checkObjectives(); });
+}
+
+/* ---- shop ---- */
+const SHOP = { open: false, items: [], sel: 0, title: '', note: '' };
+function openShop(title, items, note) {
+  SHOP.open = true; SHOP.items = items; SHOP.sel = 0;
+  SHOP.title = title; SHOP.note = note || '';
+  G.uiOpen = 'shop';
+  renderShop();
+  $('shop').style.display = 'block';
+}
+function renderShop() {
+  const box = $('shop');
+  clearEl(box);
+  const head = el('div', null, SHOP.title);
+  head.style.fontWeight = 'bold'; head.style.fontSize = '17px'; head.style.marginBottom = '4px';
+  box.appendChild(head);
+  const sub = el('div', null, 'You have $' + G.money + (SHOP.note ? ' · ' + SHOP.note : ''));
+  sub.style.fontSize = '12px'; sub.style.marginBottom = '8px';
+  box.appendChild(sub);
+  SHOP.items.forEach((it, i) => {
+    const row = el('div', 'shopRow' + (i === SHOP.sel ? ' sel' : ''));
+    row.appendChild(el('div', 'shopIcon', it.icon));
+    const nm = el('div', 'shopName', it.name);
+    if (it.desc) {
+      const d = el('div', null, it.desc);
+      d.style.fontSize = '11px'; d.style.fontWeight = 'normal'; d.style.opacity = '0.75';
+      nm.appendChild(d);
+    }
+    row.appendChild(nm);
+    row.appendChild(el('div', 'shopPrice' + (G.money >= it.price ? '' : ' cant'), '$' + it.price));
+    row.onclick = () => { SHOP.sel = i; buyShopItem(); };
+    box.appendChild(row);
+  });
+  const leave = el('button', 'uiBtn', 'Leave (Esc)');
+  leave.style.marginTop = '10px';
+  leave.onclick = closeShop;
+  box.appendChild(leave);
+}
+function buyShopItem() {
+  const it = SHOP.items[SHOP.sel];
+  if (!it) return;
+  if (G.money < it.price) {
+    sfx('thud');
+    if (STORY.onCantAfford) STORY.onCantAfford(it);
+    else toast('Not enough cash on hand.');
+    return;
+  }
+  spend(it.price, 'Supplies', it.name);
+  it.onBuy ? it.onBuy() : addItem(it.give, it.count || 1);
+  sfx('coin');
+  toast('Bought ' + it.name + '.');
+  renderShop();
+  STORY.checkObjectives();
+}
+function closeShop() {
+  SHOP.open = false;
+  $('shop').style.display = 'none';
+  if (G.uiOpen === 'shop') G.uiOpen = null;
+  if (STORY.onShopClosed) { const f = STORY.onShopClosed; STORY.onShopClosed = null; f(); }
+}
+
+/* ---- layout / letterbox ---- */
+function layout() {
+  const w = window.innerWidth, h = window.innerHeight;
+  let s = Math.min(w / CONFIG.VIEW_W, h / CONFIG.VIEW_H);
+  if (s > 1) s = Math.floor(s);          // integer upscale for crisp pixels
+  R.scale = s;
+  const sw = CONFIG.VIEW_W * s, sh = CONFIG.VIEW_H * s;
+  const left = (w - sw) / 2, top = (h - sh) / 2;
+  for (const id of ['stage', 'ui']) {
+    const node = $(id);
+    node.style.left = left + 'px'; node.style.top = top + 'px';
+    node.style.width = sw + 'px'; node.style.height = sh + 'px';
+  }
+}
+window.addEventListener('resize', layout);
+
+/* ---- input ---- */
+const KEYS = {};
+let holdTimer = null, holdFired = false;
+function inputVector() {
+  let x = 0, z = 0;
+  if (KEYS.KeyW || KEYS.ArrowUp) z -= 1;
+  if (KEYS.KeyS || KEYS.ArrowDown) z += 1;
+  if (KEYS.KeyA || KEYS.ArrowLeft) x -= 1;
+  if (KEYS.KeyD || KEYS.ArrowRight) x += 1;
+  x += TOUCH.x; z += TOUCH.z;
+  const d = Math.hypot(x, z);
+  if (d > 1) { x /= d; z /= d; }
+  return { x, z };
+}
+function pressAct() {
+  if (G.mode === 'title') return;
+  if (CH.open) { pickChoice(CH.sel); return; }
+  if (DLG.active) { advanceDialogue(); return; }
+  if (SHOP.open) { buyShopItem(); return; }
+  if (MENU.open) return;
+  if (G.mode !== 'play') return;
+  holdFired = false;
+  holdTimer = setTimeout(() => { holdFired = true; openRadial(); }, CONFIG.HOLD_MS);
+}
+function releaseAct() {
+  clearTimeout(holdTimer);
+  if (RAD.open) { closeRadial(true); return; }
+  if (holdFired) return;
+  if (G.mode === 'play' && !G.uiOpen) performAction();
+}
+window.addEventListener('keydown', e => {
+  if (e.repeat) { KEYS[e.code] = true; if (e.code === 'Tab') e.preventDefault(); return; }
+  KEYS[e.code] = true;
+  const ac = audioCtx(); ac && ac.resume && ac.resume();
+  if (G.mode === 'title') { TITLE.onKey(e); return; }
+  switch (e.code) {
+    case 'KeyE': case 'Space': case 'Enter':
+      if (document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName)) break;
+      pressAct(); e.preventDefault(); break;
+    case 'Tab': e.preventDefault();
+      if (MENU.open) closeMenu();
+      else if (G.mode === 'play' && !G.uiOpen) openMenu();
+      break;
+    case 'KeyJ': if (G.mode === 'play' && !G.uiOpen) openMenu('Journal'); break;
+    case 'KeyM': if (G.mode === 'play' && !G.uiOpen) openMenu('Map'); break;
+    case 'KeyH':
+      if (document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName)) break;
+      G.hideHUD = !G.hideHUD;
+      $('hud').style.display = G.hideHUD ? 'none' : 'block';
+      $('held').style.display = G.hideHUD ? 'none' : 'flex';
+      setObjective(G.flags.objective);
+      break;
+    case 'Escape':
+      if (CH.open) break;
+      if (SHOP.open) closeShop();
+      else if (MENU.open) closeMenu();
+      else if (RAD.open) closeRadial(false);
+      break;
+    case 'ArrowUp':
+      if (CH.open) { moveChoice(-1); e.preventDefault(); }
+      if (SHOP.open) { SHOP.sel = Math.max(0, SHOP.sel - 1); renderShop(); e.preventDefault(); }
+      break;
+    case 'ArrowDown':
+      if (CH.open) { moveChoice(1); e.preventDefault(); }
+      if (SHOP.open) { SHOP.sel = Math.min(SHOP.items.length - 1, SHOP.sel + 1); renderShop(); e.preventDefault(); }
+      break;
+  }
+});
+window.addEventListener('keyup', e => {
+  KEYS[e.code] = false;
+  if (G.mode === 'title') return;
+  if (e.code === 'KeyE' || e.code === 'Space' || e.code === 'Enter') {
+    if (document.activeElement && /INPUT|TEXTAREA/.test(document.activeElement.tagName)) return;
+    releaseAct();
+  }
+});
+
+/* ---- touch ---- */
+const TOUCH = { x: 0, z: 0, joyId: null };
+function initTouch() {
+  const base = $('joyBase'), knob = $('joyKnob');
+  const setKnob = (dx, dz) => {
+    knob.style.left = 32 + dx * 30 + 'px';
+    knob.style.top = 32 + dz * 30 + 'px';
+  };
+  base.addEventListener('pointerdown', e => {
+    TOUCH.joyId = e.pointerId; base.setPointerCapture(e.pointerId);
+  });
+  base.addEventListener('pointermove', e => {
+    if (e.pointerId !== TOUCH.joyId) return;
+    const r = base.getBoundingClientRect();
+    let dx = (e.clientX - r.left - r.width / 2) / (r.width / 2);
+    let dz = (e.clientY - r.top - r.height / 2) / (r.height / 2);
+    const d = Math.hypot(dx, dz);
+    if (d > 1) { dx /= d; dz /= d; }
+    TOUCH.x = dx; TOUCH.z = dz;
+    setKnob(dx, dz);
+    if (RAD.open) radialAim(dx, dz);
+  });
+  const joyEnd = e => {
+    if (e.pointerId !== TOUCH.joyId) return;
+    TOUCH.joyId = null; TOUCH.x = 0; TOUCH.z = 0; setKnob(0, 0);
+  };
+  base.addEventListener('pointerup', joyEnd);
+  base.addEventListener('pointercancel', joyEnd);
+  $('actBtn').addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const ac = audioCtx(); ac && ac.resume && ac.resume();
+    pressAct();
+  });
+  $('actBtn').addEventListener('pointerup', e => { e.preventDefault(); releaseAct(); });
+  $('menuBtn').addEventListener('pointerdown', e => {
+    e.preventDefault();
+    if (MENU.open) closeMenu();
+    else if (G.mode === 'play' && !G.uiOpen) openMenu();
+  });
+}
+document.addEventListener('pointerdown', () => { const c = audioCtx(); c && c.resume && c.resume(); }, { once: true });
+$('dlg').addEventListener('pointerdown', e => { e.preventDefault(); advanceDialogue(); });
+
+/* ---- title screen ---- */
+const TITLE = {
+  step: 0, seed: null,
+  show() {
+    G.mode = 'title';
+    $('title').style.display = 'flex';
+    TITLE.step = 0;
+    TITLE.render();
+  },
+  render() {
+    const body = $('titleBody');
+    clearEl(body);
+    if (TITLE.step === 0) {
+      $('titleWelcome').textContent = '';
+      const field = el('div', 'titleField');
+      const seedIn = document.createElement('input');
+      seedIn.placeholder = 'valley seed (number)'; seedIn.inputMode = 'numeric';
+      const hashSeed = (location.hash.match(/#s=(\d+)/) || [])[1];
+      if (hashSeed) seedIn.value = hashSeed;
+      field.appendChild(seedIn);
+      body.appendChild(field);
+      const go = el('button', 'uiBtn', 'Settle this valley');
+      go.onclick = () => {
+        const v = parseInt(seedIn.value, 10);
+        TITLE.pickSeed(isNaN(v) ? Math.floor(Math.random() * 9999999) : v);
+      };
+      const sur = el('button', 'uiBtn', 'Surprise me');
+      sur.onclick = () => TITLE.pickSeed(Math.floor(Math.random() * 9999999));
+      body.appendChild(go); body.appendChild(sur);
+      TITLE._go = go;
+      const loadWrap = el('div');
+      loadWrap.style.marginTop = '10px';
+      const bl = el('button', 'uiBtn', 'Load a save');
+      bl.onclick = () => TITLE.renderLoad();
+      loadWrap.appendChild(bl);
+      body.appendChild(loadWrap);
+    } else if (TITLE.step === 1) {
+      const hint = el('div', null, 'Who’s moving in?');
+      hint.style.fontSize = '13px'; hint.style.marginBottom = '6px';
+      body.appendChild(hint);
+      const mk = (label, arr, key) => {
+        const row = el('div', 'picker');
+        row.appendChild(el('b', null, label));
+        arr.forEach((col, i) => {
+          const s = el('div', 'swatch' + (G.look[key] === i ? ' sel' : ''));
+          s.style.background = col;
+          s.onclick = () => { G.look[key] = i; TITLE.render(); };
+          row.appendChild(s);
+        });
+        body.appendChild(row);
+      };
+      mk('Skin', SKINS, 'skin');
+      mk('Hair', HAIRS, 'hair');
+      mk('Shirt', SHIRTS, 'shirt');
+      const next = el('button', 'uiBtn', 'That’s me');
+      next.style.marginTop = '8px';
+      next.onclick = () => { TITLE.step = 2; TITLE.render(); };
+      body.appendChild(next);
+    } else if (TITLE.step === 2) {
+      const field = el('div', 'titleField');
+      const inp = document.createElement('input');
+      inp.placeholder = 'name your farm'; inp.maxLength = 18; inp.value = 'Sundrop Farm';
+      field.appendChild(inp);
+      body.appendChild(field);
+      const start = el('button', 'uiBtn', 'Begin — Autumn, Year 1');
+      start.onclick = () => {
+        const v = inp.value.trim();
+        if (v) G.farmName = v;
+        TITLE.begin();
+      };
+      body.appendChild(start);
+    }
+  },
+  renderLoad() {
+    const body = $('titleBody');
+    clearEl(body);
+    const inp = el('textarea', 'saveBox');
+    inp.placeholder = 'Paste a save code…';
+    body.appendChild(inp);
+    body.appendChild(el('br'));
+    const go = el('button', 'uiBtn', 'Load');
+    go.onclick = () => TITLE.load(inp.value);
+    const file = document.createElement('input');
+    file.type = 'file'; file.accept = '.almanac'; file.style.display = 'none';
+    file.onchange = e => {
+      const f = e.target.files[0];
+      if (!f) return;
+      const rd = new FileReader();
+      rd.onload = () => TITLE.load(rd.result);
+      rd.readAsText(f);
+    };
+    const bFile = el('button', 'uiBtn', 'From .almanac file');
+    bFile.onclick = () => file.click();
+    const back = el('button', 'uiBtn', 'Back');
+    back.onclick = () => TITLE.render();
+    body.appendChild(go); body.appendChild(bFile); body.appendChild(back); body.appendChild(file);
+  },
+  pickSeed(seed) {
+    TITLE.seed = seed >>> 0;
+    location.hash = '#s=' + TITLE.seed;
+    $('titleWelcome').textContent = '…raising the valley…';
+    setTimeout(() => {
+      G.world = generateWorld(TITLE.seed);
+      $('titleWelcome').textContent = 'Welcome to ' + G.world.townName + (G.world.coastal ? ', by the sea.' : '.');
+      TITLE.step = 1;
+      TITLE.render();
+    }, 60);
+  },
+  load(code) {
+    try {
+      const data = saveDecode(code);
+      $('title').style.display = 'none';
+      applySave(data);
+      toast('Welcome back to ' + G.world.townName + '.');
+    } catch (e) { $('titleWelcome').textContent = 'That code didn’t take.'; }
+  },
+  begin() {
+    $('title').style.display = 'none';
+    startNewGame();
+  },
+  onKey(e) { if (e.code === 'Enter' && TITLE.step === 0 && TITLE._go) TITLE._go.click(); }
+};
+/* =============================== STORY =================================== */
+// Year 1: the authored 6-day prologue (absolute days 6..11), then free Year 2.
+// Dialogue here is placeholder-tier by design (phase 1); real scenes in phase 2.
+const STORY = {
+  objective: null, onCantAfford: null, onShopClosed: null,
+
+  meet(id) {
+    if (!(id in G.hearts)) { G.hearts[id] = 1; }
+  },
+  heart(id, n) {
+    G.hearts[id] = clamp((G.hearts[id] || 0) + n, 0, 10);
+  },
+
+  /* ---- scene runner: walk / say / do, time frozen ---- */
+  scene(steps, done) {
+    G.mode = 'scene';
+    let i = 0;
+    const next = () => {
+      if (i >= steps.length) {
+        if (G.mode === 'scene') G.mode = 'play';   // a step may have started sleep
+        done && done();
+        return;
+      }
+      const s = steps[i++];
+      if (s.say) say(s.say, next);
+      else if (s.walk) {
+        const a = ACTORS[s.walk.id];
+        if (!a) { next(); return; }
+        a.waypoints = [{ x: s.walk.x, z: s.walk.z, onArrive: next }];
+      }
+      else if (s.tp) {
+        const a = ACTORS[s.tp.id];
+        if (a) actorSetPos(a, s.tp.x, s.tp.z);
+        next();
+      }
+      else if (s.face) {
+        const a = ACTORS[s.face.id];
+        if (a) { a.face = s.face.angle; a.group.rotation.y = s.face.angle; }
+        next();
+      }
+      else if (s.fade) { fadeOut(() => { s.fade(); fadeIn(next); }); }
+      else if (s.fn) { s.fn(); next(); }
+      else if (s.wait) setTimeout(next, s.wait);
+      else next();
+    };
+    next();
+  },
+
+  spawnVillager(id, x, z) {
+    removeActor(id);
+    return makeActor(id, CAST[id], x, z);
+  },
+  clearVillagers() {
+    for (const id in ACTORS) if (id !== 'player') removeActor(id);
+  },
+
+  /* ---- per-day cast placement (scripted for year 1; schedules in ph.2) ---- */
+  placeCast(day) {
+    STORY.clearVillagers();
+    const W = G.world;
+    const shopPos = id => {
+      const s = W.shops.find(s => s.id === id);
+      return s ? { x: s.x + 1.5, z: s.z + s.d / 2 + 1.4 } : { x: W.gazebo.x, z: W.gazebo.z };
+    };
+    const rest = isRestday(day);
+    if (day === 7) return;                       // fair day: cast placed by the scene
+    if (!rest) {
+      const g = shopPos('general'); STORY.spawnVillager('bramm', g.x, g.z);
+      const t = shopPos('tavern'); STORY.spawnVillager('maren', t.x, t.z);
+      const f = shopPos('forge'); STORY.spawnVillager('hetta', f.x, f.z);
+      const cp = shopPos('carpenter'); STORY.spawnVillager('corwin', cp.x, cp.z);
+      const cl = shopPos('clinic'); STORY.spawnVillager('isolde', cl.x, cl.z);
+      STORY.spawnVillager('greta', W.ranchGate.x - 2, W.ranchGate.z + 1);
+      STORY.spawnVillager('pip', W.gazebo.x + 4, W.gazebo.z + 5);
+      STORY.spawnVillager('aldwin', W.gazebo.x - 5, W.gazebo.z + 5.5);
+      STORY.spawnVillager('rolf', W.town.x + 26, W.pathZ + 6);
+      STORY.spawnVillager('ness', W.dock.x, W.dock.z - 1.2);
+      STORY.spawnVillager('fen', W.marker.x + 2, W.marker.z + 6);
+      STORY.spawnVillager('sable', W.trailX - 14, -20);
+    } else {
+      // Restday: shops shut. Bramm's in the back room (unseen). Sable: the bench.
+      STORY.spawnVillager('sable', W.bench.x, W.bench.z + 1.2);
+      STORY.spawnVillager('ness', W.dock.x, W.dock.z - 1.2);
+      STORY.spawnVillager('pip', W.gazebo.x + 3, W.gazebo.z + 5);
+      STORY.spawnVillager('fen', W.marker.x + 2, W.marker.z + 6);
+      STORY.spawnVillager('maren', shopPos('tavern').x, shopPos('tavern').z);
+    }
+    if (day === 9 && !G.flags.aldwinDone) removeActor('aldwin');   // he's coming to you
+  },
+
+  /* ================= day starts ================= */
+  onDayStart(day, fromLoad) {
+    STORY.placeCast(day);
+    spawnForage();
+    updateHUD();
+    applyGrade();
+    if (R.glyphs.general) R.glyphs.general.visible = !!G.network.connected.general;
+    switch (day) {
+      case 6: break;                              // handled by startNewGame intro
+      case 7:
+        setObjective('Water the turnips — the County Fair starts at noon');
+        if (!fromLoad) say(['Bright banners over the square this morning. The County Fair — the whole valley will be there at noon.']);
+        jline('Fair day. Everyone in one place, like the valley holding its breath.');
+        break;
+      case 8:
+        setObjective('Restday: harvest your turnips and ship them (bin)');
+        if (!fromLoad) say(['Restday. Every shop in ' + G.world.townName + ' is shut tight. The turnips don’t care — they’re ready.']);
+        break;
+      case 9:
+        setObjective('Winter. You’ll want a coat — Bramm’s General sells them');
+        if (!fromLoad) say(['Winter came overnight. The kind of cold that gets into your boots.',
+          'A coat. Today. Bramm’s will have one.']);
+        jline('Winter 1. The cold doesn’t knock first.');
+        break;
+      case 10:
+        G.mail.push({ day: 10, from: 'Aldwin', title: 'That thing I mentioned',
+          body: 'The ledger book, like I promised. Funny thing — I mailed it two days ago, same day I saw you. It took the mail two days to cross one valley. That’s rather the point. — A.', read: false });
+        setObjective('Something’s in the mailbox');
+        if (!fromLoad) say(['The mailbox flag is up.']);
+        break;
+      case 11:
+        setObjective('Restday · Starlight Eve tonight at the gazebo');
+        if (!fromLoad) say(['Starlight Eve tonight. And a Restday — though something feels different about the morning.']);
+        // Bramm walks to the shore at ~9:00 (flag checked in tickStory)
+        G.flags.brammShoreQueued = true;
+        break;
+      case 12:
+        if (!G.flags.year2Card) {
+          G.flags.year2Card = true;
+          STORY.showYearReview();
+          return;
+        }
+        break;
+      default:
+        if (day > 12) setObjective(null);
+    }
+  },
+
+  /* ================= objectives ================= */
+  countTiles(fn) { return G.world.tiles.filter(fn).length; },
+  checkObjectives() {
+    const day = G.day;
+    if (day === 6) {
+      const planted = STORY.countTiles(t => t.crop === 'turnip');
+      const watered = STORY.countTiles(t => t.crop === 'turnip' && t.watered);
+      if (G.flags.introDone && planted < 24) setObjective('Till the starter patch and plant your free turnips (hold E to pick seeds)');
+      else if (planted >= 24 && watered < planted) setObjective('Water the turnips (face a planted tile, press E)');
+      else if (planted >= 24) setObjective('Good work. Sleep when the light goes (farmhouse door, from 18:00)');
+    } else if (day === 7) {
+      const watered = STORY.countTiles(t => t.crop === 'turnip' && t.watered);
+      if (watered >= 20) setObjective('Turnips watered. The Fair starts at noon — don’t be late');
+    } else if (day === 8) {
+      if (G.dayFlags.shippedAny) {
+        setObjective('Shipped. The check comes in two days — Restday evening is yours');
+        if (!G.flags.shippedLesson) {
+          G.flags.shippedLesson = true;
+          say(['The bin takes the turnips. A slip of carbon paper takes their place: "CHECK TO FOLLOW — ALLOW 2 DAYS."',
+            'Two days. The seeds at Bramm’s want paying today, but sure — two days.']);
+          jline('Shipped the turnip harvest. Payment is now a rumor with a postmark.');
+        }
+      }
+    } else if (day === 10) {
+      if (G.ledger.unlocked && !G.network.connected.general) setObjective('Take the ledger to Bramm’s General — Aldwin says he’s the pilot');
+      if (G.network.connected.general && !G.flags.coatBought) setObjective('Buy the coat you couldn’t afford yesterday');
+      if (G.flags.coatBought) setObjective('Warm at last. The evening is yours');
+    } else if (day === 12) {
+      if (G.flags.year2Started) {
+        const bought = Object.keys(G.inventory).some(id => ITEMS[id] && ITEMS[id].seedOf && CONFIG.CROPS[ITEMS[id].seedOf].seasons.includes('Spring'));
+        if (bought) setObjective('Your first spring. The field is yours — no script, just seasons');
+      }
+    }
+  },
+
+  /* ================= mid-day triggers (called every sim tick) ================= */
+  tick() {
+    const day = G.day, p = player();
+    if (!p || G.mode !== 'play' || G.uiOpen) return;
+    // Fair auto-start at noon, day 7
+    if (day === 7 && G.hour >= 12 && !G.flags.fairDone) {
+      G.flags.fairDone = true;
+      STORY.runFair();
+    }
+    // Aldwin at the fence, day 9 (after the shop attempt, or 13:00 regardless)
+    if (day === 9 && !G.flags.aldwinDone &&
+        (G.flags.squeezeFelt || G.hour >= 13) &&
+        zoneAt(p.x, p.z) === 'farm') {
+      G.flags.aldwinDone = true;
+      STORY.runAldwin();
+    }
+    // Ledger reveal after reading mail, day 10
+    if (day === 10 && !G.ledger.unlocked && G.mail.some(m => m.day === 10 && m.read)) {
+      STORY.runLedgerArrives();
+    }
+    // Bramm walks to the shore, day 11 morning
+    if (day === 11 && G.flags.brammShoreQueued && G.hour >= 9) {
+      G.flags.brammShoreQueued = false;
+      STORY.runBrammShore();
+    }
+    // Starlight Eve at 18:00
+    if (day === 11 && G.hour >= 18 && !G.flags.starlightDone) {
+      G.flags.starlightDone = true;
+      STORY.runStarlight();
+    }
+  },
+
+  /* ================= scenes ================= */
+  runIntro() {
+    const W = G.world;
+    G.flags.introDone = false;
+    const m = STORY.spawnVillager('maren', W.gazebo.x + 1.5, W.gazebo.z + 5.2);
+    STORY.meet('maren');
+    updateCamera(player().x, player().z, true);
+    STORY.scene([
+      { say: [
+        { who: 'maren', text: 'There you are! The new face for the old ' + G.farmName + ' place. I’m Maren — I pour the drinks at the Bluebird, which makes me the town’s front porch.' },
+        { who: 'maren', text: 'This is ' + W.townName + '. Gazebo square — everything happens here, and by everything I mean the four things a year that happen.' },
+        { who: 'maren', text: 'Up the street: Bramm’s General for seeds and sundries — gruff shell, caramel center. Hetta’s Forge if a tool breaks. Corwin builds anything that stands still.' },
+        { who: 'maren', text: 'Clinic’s Isolde — quiet, reads more than she talks. And the Bluebird is mine. Come by when the light’s on, which is always.' },
+        { who: 'maren', text: 'Come on, I’ll walk you to your gate. It’s a short walk. Everything here is a short walk — that’s the good part.' }
+      ] },
+      { walk: { id: 'maren', x: W.gazebo.x, z: W.pathZ } },
+      { fn: () => { player().waypoints = []; } },
+      { walk: { id: 'player', x: W.gazebo.x - 3, z: W.pathZ } },
+      { walk: { id: 'maren', x: W.bridge.x + 6, z: W.pathZ } },
+      { walk: { id: 'player', x: W.bridge.x + 3, z: W.pathZ } },
+      { walk: { id: 'maren', x: W.gate.x + 2, z: W.pathZ } },
+      { walk: { id: 'player', x: W.gate.x + 4.5, z: W.pathZ } },
+      { say: [
+        { who: 'maren', text: 'And here’s yours. Fence needs love, field needs everything — but the starter patch by the porch is cleared and the well works.' },
+        { who: 'maren', text: 'Here — turnip seeds, on the house. Two days to harvest, even this late in autumn. Till, plant, water. In that order, farmer.' },
+        { who: 'maren', text: 'Fair’s tomorrow at noon. Whole valley in one square. Don’t miss it — sleep when the light goes.' }
+      ] },
+      { fn: () => {
+        addItem('seed_turnip', 36);
+        G.heldItem = 'seed_turnip';
+        G.flags.introDone = true;
+        jline('Arrived in ' + W.townName + '. Maren walked me home like she’d done it a hundred times. Maybe she has.');
+        setObjective('Till the starter patch and plant your free turnips');
+        updateHUD();
+      } },
+      { walk: { id: 'maren', x: W.bridge.x + 8, z: W.pathZ } },
+      { fn: () => { removeActor('maren'); } }
+    ]);
+  },
+
+  runFair() {
+    const W = G.world;
+    const gx = W.gazebo.x, gz = W.gazebo.z;
+    STORY.scene([
+      { fade: () => {
+        actorSetPos(player(), gx, gz + 9);
+        player().face = 0; player().group.rotation.y = 0;
+        STORY.clearVillagers();
+        const spots = [
+          ['bramm', -6, 4], ['hetta', -4, 3.4], ['corwin', -2, 4.2], ['isolde', 0, 3.6],
+          ['rolf', 2, 4.2], ['maren', 4, 3.4], ['greta', 6, 4], ['aldwin', -3, 6],
+          ['ness', 5, 6.2], ['fen', -5, 6.4], ['pip', 1, 6.6], ['sable', 7, 6]
+        ];
+        for (const [id, dx, dz] of spots) {
+          STORY.spawnVillager(id, gx + dx, gz + dz);
+          STORY.meet(id);
+        }
+        G.hour = 12;
+      } },
+      { say: [
+        'The whole valley, one square. Pie tables, a fiddle somewhere, and a row of pumpkins on the judging stand.',
+        { who: 'aldwin', text: 'Welcome, welcome. The judging of the gourds! As the fair’s oldest surviving official, my verdict is final and my palate is beyond reproach.' },
+        { who: 'maren', text: 'That’s the new farmer, everyone! Be nice. Or interesting. Ideally both.' },
+        { who: 'greta', text: 'Greta. Ranch out east. When you’re ready for hens, you come see me and nobody else.' },
+        { who: 'hetta', text: 'Hetta. Forge. When your hoe gives out — and it will — I’ll make you a better one.' },
+        { who: 'pip', text: 'I know where ALL the berries are. All of them. It’s not a secret if I tell only you.' },
+        { who: 'ness', text: 'Ness. I fish. That’s the whole biography.' },
+        { who: 'aldwin', text: 'And the blue ribbon goes to — Rolf, again, for a pumpkin the size of a well-fed calf.' },
+        { who: 'rolf', text: 'It’s the watering that does it. Every day, no gaps. Farming’s just showing up, and I show up.' },
+        { who: 'rolf', text: 'You grow anything yet? Turnips. Hm. Well. Next year there’ll be a pumpkin with your name on it, I expect.' },
+        { who: 'rolf', text: '…That was a challenge, new neighbor. In case the tone didn’t land.' },
+        'The afternoon slides by in pie and small talk. It’s a good town. It’s a tired town, but it doesn’t know it yet.'
+      ] },
+      { fn: () => {
+        G.hour = 17;
+        jline('The County Fair. Met the whole valley in one afternoon. Rolf’s pumpkin took the ribbon and he said "next year" like a dare.');
+        setObjective('The fair winds down. Evening’s yours');
+        STORY.placeCast(7);
+      } }
+    ]);
+  },
+
+  runAldwin() {
+    const W = G.world;
+    const a = STORY.spawnVillager('aldwin', W.gate.x + 6, W.pathZ);
+    STORY.meet('aldwin');
+    STORY.scene([
+      { walk: { id: 'aldwin', x: W.gate.x + 1.5, z: W.pathZ } },
+      { say: [
+        { who: 'aldwin', text: 'Cold enough for you? I saw you at Bramm’s window. Wanting a coat, I’d guess, and waiting on a check to cross one small valley.' },
+        { who: 'aldwin', text: 'Thirty years I was the county extension agent. Do you know what I saw ruin more farms than weather? Waiting. Money that exists but isn’t here yet.' },
+        { who: 'aldwin', text: 'There’s a thing now — Ambrook, it’s called. A ledger that keeps itself, payments that arrive the day they’re earned. Some counties over, whole towns run on it.' },
+        { who: 'aldwin', text: 'Here — the flyer. I’ve been carrying a stack of these around like a man handing out religion. I’ll mail you the starter ledger tonight.' },
+        { who: 'aldwin', text: '…By mail. Yes. I hear it too. Give it two days — and let that be the last time waiting two days is funny.' }
+      ] },
+      { fn: () => {
+        G.flags.flyerTaken = true;
+        jline('Aldwin at the fence with a flyer. "Money that exists but isn’t here yet" — he said it like a diagnosis. The check, for the record: still not here.');
+        setObjective('The check is still in the mail. Get through the day');
+        STORY.heart('aldwin', 1);
+      } },
+      { walk: { id: 'aldwin', x: W.bridge.x + 8, z: W.pathZ } },
+      { fn: () => removeActor('aldwin') }
+    ]);
+  },
+
+  runLedgerArrives() {
+    G.ledger.unlocked = true;
+    // Tag year-to-date income so the mini-reveal has numbers to point at.
+    const forage = G.ledger.entries.filter(e => e.enterprise === 'Foraging' && e.amount > 0).reduce((s, e) => s + e.amount, 0);
+    const turnip = G.ledger.entries.filter(e => e.enterprise === 'Turnip' && e.amount > 0).reduce((s, e) => s + e.amount, 0);
+    const lines = [
+      'Inside the parcel: a green ledger book, cloth-bound, heavier than it looks. It smells like a bank and a barn at once.',
+      'You copy in the season so far. The book sorts every dollar on its own — turnips here, foraged finds there, seeds in red.'
+    ];
+    if (forage > turnip) {
+      lines.push('Huh. The wild mushrooms and walnuts out-earned the turnips. The turnips you watered every day. Nobody watered a walnut.');
+    } else {
+      lines.push('There it is in green and red: what the field made, what the pockets spent. The farm has a shape now.');
+    }
+    lines.push('Aldwin’s note, tucked in the flap: "Bramm agreed to pilot the network. Told me it was nonsense. Was holding the sign-up sheet while he said it. Go see him."');
+    say(lines, () => {
+      jline('The Ledger came. Green book, quiet authority. Foraging beat farming this season, which the turnips and I will not discuss further.');
+      STORY.checkObjectives();
+    });
+  },
+
+  runBrammConnect(shopAfter) {
+    STORY.meet('bramm');
+    STORY.scene([
+      { say: [
+        { who: 'bramm', text: 'You. Aldwin’s new convert. Fine — see the box on the counter? Thirty years of receipts. THE box. Sit down, you’re helping.' },
+        'You sit. The box is chaos in paper form: feed slips, carbon copies, a receipt for a wedding cake with no date.'
+      ] },
+      { fade: () => { G.hour = Math.min(G.hour + 1, 17.5); updateHUD(); } },
+      { say: [
+        'An hour goes by. Bramm talks while you sort — about the store, his father’s store before it, about Restdays lost to arithmetic.',
+        { who: 'bramm', text: 'Every Restday, y’understand. Back room, adding machine, this box. My one day. For thirty years my one day has smelled like carbon paper.' },
+        { who: 'bramm', text: 'Alright. Aldwin’s gadget. If it’s nonsense I want a witness. Watch the counter.' },
+        'He presses the last button. The counter glyph blinks on — a small green mark, steady as a pilot light.'
+      ] },
+      { fn: () => {
+        G.network.connected.general = true;
+        if (R.glyphs.general) R.glyphs.general.visible = true;
+        sfx('chime');
+        STORY.heart('bramm', 2);
+        jline('Sat an hour with Bramm and thirty years of receipts. When the green glyph lit on his counter he grunted — for Bramm, that’s a parade. His store settles instantly now.');
+      } },
+      { say: [
+        { who: 'bramm', text: 'Huh. Says the till reconciles itself at close. We’ll see about— huh. It already did.' },
+        { who: 'bramm', text: 'Well. You sat the hour, so you get customer treatment. Buy something. The coat’s still where you left your pride yesterday.' }
+      ] }
+    ], shopAfter);
+  },
+
+  runBrammShore() {
+    const W = G.world;
+    G.flags.brammShoreStarted = true;
+    const b = STORY.spawnVillager('bramm', W.town.x - 38, W.pathZ);
+    b.speed = 2.6;
+    b.waypoints = [
+      { x: W.bridge.x + 6, z: W.pathZ },
+      { x: W.pool.x + 4, z: W.pool.z - 10 },
+      { x: W.bench.x + 1.8, z: W.bench.z + 0.8, onArrive: () => {
+        const p = player();
+        if (dist2(p.x, p.z, W.bench.x, W.bench.z) < 250) {
+          G.flags.shoreWitnessed = true;
+          STORY.scene([
+            { say: [
+              'Bramm — Bramm, of Bramm’s General, on a Restday morning — is standing at the shore bench like a man who took a wrong turn thirty years ago and just found the road.',
+              { who: 'sable', text: '…The shopkeeper. You’re a long way from an adding machine.' },
+              { who: 'bramm', text: 'Books took an hour. Whole rest of the day just — standing there. Like this bench. Mind if I…' },
+              { who: 'sable', text: 'It’s a public bench. That’s rather the best thing about it.' },
+              'They sit. At opposite ends, facing the same water. Nobody says anything, and it isn’t awkward — it’s the other thing.'
+            ] },
+            { fn: () => jline('Saw Bramm at the shore bench this morning. Sable was there. They sat like two parentheses around a sentence neither of them said. First Restday of the rest of his life, I suppose.') }
+          ]);
+        } else if (!G.flags.shoreRumored) {
+          G.flags.shoreRumored = true;
+          jline('Word at the tavern: Bramm was seen at the shore this morning. The shore. Bramm. The town will be chewing that one for a season.');
+        }
+      } }
+    ];
+  },
+
+  runStarlight() {
+    const W = G.world;
+    const gx = W.gazebo.x, gz = W.gazebo.z;
+    // If the shore meeting happened off-screen (or is still mid-walk), the town talks.
+    if (G.flags.brammShoreStarted && !G.flags.shoreWitnessed && !G.flags.shoreRumored) {
+      G.flags.shoreRumored = true;
+      jline('Word at the tavern: Bramm was seen headed for the shore this morning. The shore. Bramm. The town will be chewing that one for a season.');
+    }
+    STORY.scene([
+      { fade: () => {
+        G.weather = 'snow';
+        actorSetPos(player(), gx, gz + 9);
+        player().face = 0; player().group.rotation.y = 0;
+        STORY.clearVillagers();
+        const spots = [
+          ['bramm', -5, 4], ['hetta', -3, 3.4], ['corwin', -1, 4.2], ['isolde', 1, 3.6],
+          ['rolf', 3, 4.2], ['maren', 5, 3.4], ['greta', -6, 6], ['aldwin', -2, 6.2],
+          ['ness', 6, 6], ['fen', -4, 6.4], ['pip', 2, 6.6], ['sable', 4, 6]
+        ];
+        for (const [id, dx, dz] of spots) STORY.spawnVillager(id, gx + dx, gz + dz);
+        G.hour = 19;
+        applyGrade();
+      } },
+      { say: [
+        'Starlight Eve. Snow coming down soft through lantern light, the gazebo strung with little flames, the whole town breathing steam.',
+        { who: 'maren', text: 'Gather in! The draw! One name to a slip, one gift to a name — the box has spoken since before any of us could argue with it.' },
+        { who: 'pip', text: 'I got Ness! Ness, I’m getting you WORMS. The good kind!' },
+        { who: 'ness', text: '…Kid gets it.' },
+        { who: 'maren', text: 'And the new farmer draws — well, would you look at that. The town itself. First winter’s on all of us. Welcome home, farmer.' },
+        'Someone presses a warm parcel into your hands: a knit scarf, valley-made, in a green that a certain ledger would approve of.',
+        { who: 'aldwin', text: 'A good year, all told. Harder than it needed to be, in places. Softer than it used to be, in one or two. We’ll take it.' }
+      ] },
+      { fn: () => {
+        addItem('scarf', 1);
+        jline('Starlight Eve. Snow, lanterns, the gift draw. The town gave me a scarf. I have lived here six days and it already fits.');
+      } },
+      { fn: () => {
+        // Festival ends the day (spec §13). Straight to sleep & the year review.
+        doSleep();
+      } }
+    ]);
+  },
+
+  showYearReview() {
+    G.mode = 'scene';
+    const card = $('yearCard');
+    clearEl(card);
+    card.style.display = 'block';
+    card.appendChild(el('h2', null, 'Year 1 — ' + G.farmName));
+    const body = el('div');
+    body.id = 'yearBody';
+    const by = {};
+    for (const e of G.ledger.entries) by[e.enterprise] = (by[e.enterprise] || 0) + e.amount;
+    const income = Object.keys(by).filter(k => by[k] > 0);
+    const spendKeys = Object.keys(by).filter(k => by[k] < 0);
+    body.appendChild(el('b', null, 'The Ledger says:'));
+    for (const k of income) body.appendChild(el('div', null, '  ' + k + ': +$' + by[k]));
+    for (const k of spendKeys) body.appendChild(el('div', null, '  ' + k + ': −$' + (-by[k])));
+    const pend = G.pendingChecks.reduce((s, c) => s + c.amount, 0);
+    if (pend) body.appendChild(el('div', null, '  Still in the mail: $' + pend));
+    body.appendChild(el('br'));
+    body.appendChild(el('b', null, 'The Journal remembers:'));
+    const highlights = G.journal.slice(-6).map(e => e.lines[0]).filter(Boolean);
+    for (const h of highlights) body.appendChild(el('div', null, '  · ' + h));
+    card.appendChild(body);
+    const btnJ = el('button', 'uiBtn', 'Export journal (.txt)');
+    btnJ.onclick = exportJournal;
+    card.appendChild(btnJ);
+    const btn = el('button', 'uiBtn', 'Begin Year 2 — your first spring');
+    btn.onclick = () => {
+      card.style.display = 'none';
+      G.flags.year2Started = true;
+      fadeOut(() => {
+        say(['YEAR 2 — SPRING.',
+          'The longest days you’ve had. A field you cleared yourself. And at Bramm’s, seed money that settles the same day you earn it.',
+          'The tutorial is over. The farm is yours.'], () => {
+          setObjective('Spring! Buy seeds at Bramm’s — your money settles same-day now');
+          G.mode = 'play';
+        });
+        fadeIn();
+      });
+    };
+    card.appendChild(btn);
+    const mark = el('div', null, 'ALMANAC · made with Ambrook · ambrook.com · seed ' + G.world.seed);
+    mark.style.cssText = 'font-size:10px;color:var(--green);margin-top:10px';
+    card.appendChild(mark);
+  },
+
+  /* ================= doors & shops ================= */
+  enterDoor(door) {
+    const W = G.world;
+    if (door.id === 'farmhouse') {
+      if (G.hour >= CONFIG.SLEEP_FROM) {
+        showChoice(['Sleep until morning', 'Not yet'], i => { if (i === 0) doSleep(); });
+      } else {
+        say(['Too early to turn in — the light’s still worth something. (You can sleep from 18:00.)']);
+      }
+      return;
+    }
+    const rest = isRestday(G.day);
+    const open = G.hour >= 9 && G.hour < 17;
+    if (door.id === 'general') {
+      if (rest && G.day !== 11) { say(['CLOSED — RESTDAY, says the sign. Through the side window: a lamp on in the back room, and the slow ka-chunk of an adding machine.']); sfx('kachunk'); return; }
+      if (G.day === 11) { say(['The general store is dark. On a Restday, for once, actually dark.']); return; }
+      if (!open) { say(['Bramm’s is shut. Hours: 9:00–17:00.']); return; }
+      if (G.day === 10 && G.ledger.unlocked && !G.network.connected.general) {
+        STORY.runBrammConnect(() => STORY.openGeneral());
+        return;
+      }
+      STORY.openGeneral();
+      return;
+    }
+    if (rest) { say(['Shut for the Restday. The whole street is.']); return; }
+    if (!open && door.id !== 'tavern') { say(['Closed for the day.']); return; }
+    if (door.id === 'tavern') say([{ who: 'maren', text: 'Bluebird’s open! Well — the door is. The kitchen argues. What’s the news from the farm?' }]);
+    else if (door.id === 'forge') say([{ who: 'hetta', text: 'Forge is hot, tools are cold. Come spring I’ll upgrade that sad hoe of yours — copper, then we talk.' }]);
+    else if (door.id === 'carpenter') say([{ who: 'corwin', text: 'Corwin! Carpentry! You’ve got a fine porch and I’ve got ideas about it. Come back when you’ve got lumber money.' }]);
+    else if (door.id === 'clinic') say([{ who: 'isolde', text: 'Oh — hello. You look… well, you look like farming. Rest when you’re tired. People forget that’s medical advice.' }]);
+    else say(['The door is friendly but firm: this is somebody’s home.']);
+  },
+
+  openGeneral() {
+    const season = seasonOf(G.day);
+    const items = [];
+    for (const id in CONFIG.CROPS) {
+      const c = CONFIG.CROPS[id];
+      if (c.seasons.includes(season)) {
+        items.push({ icon: '🌱', name: c.name + ' Seeds ×' + c.packet, price: c.seed,
+          give: 'seed_' + id, count: c.packet, desc: c.days + ' days to harvest · sells $' + c.sell });
+      }
+    }
+    if (season === 'Winter' && !G.flags.coatBought) {
+      items.push({ icon: '🧥', name: 'Winter Coat', price: CONFIG.COAT_PRICE,
+        desc: 'Wool, valley-made. You want this.',
+        onBuy: () => {
+          G.flags.coatBought = true;
+          addItem('coat', 1);
+          say([{ who: 'bramm', text: 'Good coat. Should’ve had it two days ago, but that wasn’t your fault, was it.' }]);
+        } });
+    }
+    if (!items.length) items.push({ icon: '🫙', name: 'Preserving Jar', price: 12, give: 'walnut', desc: 'For a quieter month. (Seeds return in spring.)' });
+    const note = G.network.connected.general ? '✳ settles instantly' : 'cash only, checks by mail';
+    STORY.onCantAfford = it => {
+      if (G.day === 9 && !G.flags.squeezeFelt) {
+        G.flags.squeezeFelt = true;
+        say([
+          { who: 'bramm', text: 'That’s $' + it.price + '. You’ve got… not that.' },
+          { who: 'player', text: 'I have a check coming. ' + (G.pendingChecks.length ? '$' + G.pendingChecks.reduce((s, c) => s + c.amount, 0) + '. ' : '') + 'It exists — it’s just in an envelope somewhere between here and here.' },
+          { who: 'bramm', text: 'Everybody’s money is in an envelope somewhere. That’s the whole valley, friend. Come back when yours lands.' }
+        ], () => {
+          jline('Stood in Bramm’s with a coat in hand and money that technically exists. Put the coat back. The walk home was educational, coldness-wise.');
+          setObjective('The check’s still in the mail. Head home — winter days are short');
+        });
+      } else {
+        toast('Not enough cash on hand.');
+      }
+    };
+    openShop("Bramm's General", items, note);
+  },
+
+  /* ================= talk ================= */
+  talkTo(npc) {
+    STORY.meet(npc.id);
+    const p = player();
+    npc.face = Math.atan2(p.x - npc.x, p.z - npc.z);
+    npc.group.rotation.y = npc.face;
+    const season = seasonOf(G.day), rest = isRestday(G.day);
+    const L = {
+      bramm: rest ? 'Store’s shut. I’m only out here because the books blur if I don’t blink some daylight between columns.'
+        : 'Need something? It’s on a shelf. Everything’s on a shelf. That’s retail.',
+      maren: 'The Bluebird’s always warmer than it looks. Come by after dark and prove me right.',
+      hetta: 'That hoe of yours is one season from retirement. When it goes, I’ll build you better.',
+      corwin: 'Good bones on your farmhouse. Great bones! Bones deserve floors, eventually. Call me.',
+      isolde: G.stamina <= 50 ? 'You’re carrying your shoulders like a full watering can. Sit down for a minute. Doctor’s orders — informally.'
+        : 'Nice to see you upright and rested. That’s most of health, honestly.',
+      rolf: 'Watering streak. Write it down. A pumpkin remembers every day you skipped — that’s the whole game, neighbor.',
+      greta: 'Hens in spring, if you’ve got the coop for it. Come see me when you do. Early — I’m up before the roosters, it embarrasses them.',
+      aldwin: G.flags.flyerTaken ? 'The flyer still in your pocket? Good. Paper remembers what people mean to get to.'
+        : 'A fine ' + season.toLowerCase() + ' morning to be retired in, and I intend to waste none of it usefully.',
+      ness: 'River’s honest. Cold, but honest. That’s more than you can say for most accounting.',
+      fen: 'The old marker up the trail — I keep it swept. Why? It likes being swept. Some questions end there.',
+      pip: 'The BEST berries are past the big rock, but the SECRET berries — okay I’ll tell you later. When it’s safer.',
+      sable: rest ? 'The bench and I have an arrangement. It holds still, and I stay long enough to notice something worth writing down.'
+        : 'Just walking. The valley reads differently every day — someone ought to keep up with the drafts.'
+    };
+    say([{ who: npc.id, text: L[npc.id] || '…' }], () => {
+      if (!G.flags['met_' + npc.id]) {
+        G.flags['met_' + npc.id] = true;
+        STORY.heart(npc.id, 0);   // registered on the wall
+      }
+    });
+  }
+};
+
+function startNewGame() {
+  if (!G.world) G.world = generateWorld(TITLE.seed || 1234567);
+  buildWorldScene();
+  buildItems();
+  const W = G.world;
+  G.day = CONFIG.START_DAY;
+  G.hour = 8;
+  G.weather = weatherFor(G.day);
+  spawnPlayer(W.gazebo.x - 1.5, W.gazebo.z + 6);
+  spawnForage();
+  updateCamera(player().x, player().z, true);
+  applyGrade();
+  updateHUD();
+  jlineSeed();
+  STORY.runIntro();
+}
+function jlineSeed() {
+  jline('Signed the deed this morning. ' + G.farmName + ', ' + G.world.townName + ' valley. The field is a mess and the mess is mine.');
+}
+/* ============================== MAIN LOOP ================================ */
+let lastT = 0, hudT = 0, gradeT = 0;
+function frame(tms) {
+  requestAnimationFrame(frame);
+  const t = tms / 1000;
+  const dt = Math.min(0.05, t - lastT || 0.016);
+  lastT = t;
+  // fps meter (debug/acceptance)
+  G.fps.frames++;
+  if (t - G.fps.last >= 1) { G.fps.value = G.fps.frames; G.fps.frames = 0; G.fps.last = t; }
+  if (!G.world || !R.worldGroup) return;
+
+  tickTime(dt);
+  const p = player();
+  if (p) {
+    if (G.mode === 'play' && !G.uiOpen) {
+      const iv = inputVector();
+      const moving = (iv.x || iv.z) ? moveActor(p, iv.x, iv.z, dt) : false;
+      tickActorAnim(p, dt, moving && (iv.x || iv.z));
+    } else if (G.mode === 'scene') {
+      tickNPC(p, dt);       // scenes drive the player by waypoint
+    } else {
+      tickActorAnim(p, dt, false);
+    }
+    if (RAD.open) { const iv = inputVector(); radialAim(iv.x, iv.z); }
+    for (const id in ACTORS) if (id !== 'player') tickNPC(ACTORS[id], dt);
+    STORY.tick();
+    updateTargetHighlight(t);
+    updateCamera(p.x, p.z, false);
+  }
+  rebuildTiles();
+  tickWater(dt);
+  tickParticles(dt);
+  gradeT += dt;
+  if (gradeT > 0.5) { gradeT = 0; applyGrade(); }
+  hudT += dt;
+  if (hudT > 0.25) { hudT = 0; if (G.mode === 'play') updateHUD(); }
+  R.renderer.render(R.scene, R.camera);
+}
+
+/* ================================ BOOT =================================== */
+function boot() {
+  seedRNG(1);                     // texture-speckle stream; real seed re-seeds at worldgen
+  buildStaticTextures();
+  buildMaterials();
+  buildItems();
+  initThree();
+  initTouch();
+  layout();
+  TITLE.show();
+  requestAnimationFrame(frame);
+}
+boot();
+
+/* ========================= DEBUG / ACCEPTANCE ============================ */
+// Harmless in play; used for the phase self-check. Not part of the game UI.
+window.ALMANAC = {
+  G, R, CONFIG, CAST, ITEMS,
+  fps: () => G.fps.value,
+  hour(h) { G.hour = h; updateHUD(); },
+  money(n) { G.money = n; updateHUD(); },
+  give(id, n) { addItem(id, n || 1); },
+  tp(x, z) { const p = player(); actorSetPos(p, x, z); updateCamera(x, z, true); },
+  sleep() { doSleep(); },
+  state() {
+    return { mode: G.mode, day: G.day, season: seasonOf(G.day), hour: +G.hour.toFixed(2),
+      weather: G.weather, money: G.money, checks: G.pendingChecks, fps: G.fps.value,
+      objective: G.flags.objective, connected: G.network.connected, ui: G.uiOpen,
+      dlg: DLG.active, seed: G.world && G.world.seed, town: G.world && G.world.townName };
+  },
+  skipDialogue() {
+    for (let i = 0; i < 200 && (DLG.active || CH.open); i++) {
+      if (CH.open) pickChoice(CH.sel);
+      else advanceDialogue();
+    }
+  },
+  // Step the sim without waiting on (possibly throttled) rAF. Test-only.
+  fastForward(sec, autoAdvance) {
+    const dt = 1 / 60;
+    const steps = Math.ceil(sec / dt);
+    for (let i = 0; i < steps; i++) {
+      if (autoAdvance && (DLG.active || CH.open)) this.skipDialogue();
+      tickTime(dt);
+      const p = player();
+      if (p && G.mode === 'scene') tickNPC(p, dt);
+      for (const id in ACTORS) if (id !== 'player') tickNPC(ACTORS[id], dt);
+      STORY.tick();
+      if (autoAdvance && (DLG.active || CH.open)) this.skipDialogue();
+    }
+    TL.dirty = true;
+    updateHUD();
+    const p2 = player();
+    if (p2) updateCamera(p2.x, p2.z, true);
+    return this.state();
+  },
+  plantStarter() {   // till+plant+water the starter patch (test helper)
+    const W = G.world, f = W.field;
+    const sx0 = Math.floor(f.w / 2 - 3);
+    addItem('seed_turnip', 40);
+    for (let tz = 0; tz < 6; tz++) for (let tx = sx0; tx < sx0 + 6; tx++) {
+      const t = W.tiles[tz * f.w + tx];
+      if (t.s === 'wild') { t.s = 'clear'; t.obj = null; }
+      t.s = 'till'; t.crop = 'turnip'; t.grown = 0; t.watered = true; t.dead = false;
+    }
+    takeItem('seed_turnip', 36);
+    TL.dirty = true;
+    STORY.checkObjectives();
+  },
+  waterAll() {
+    for (const t of G.world.tiles) if (t.crop) t.watered = true;
+    TL.dirty = true; STORY.checkObjectives();
+  },
+  harvestAll() {
+    for (const t of G.world.tiles) {
+      if (t.crop && !t.dead && cropVisualStage(t) === 3) { addItem(t.crop, 1); t.crop = null; t.grown = 0; }
+    }
+    TL.dirty = true;
+  },
+  shipAll() {
+    for (const id of Object.keys(G.inventory)) {
+      if (ITEMS[id] && ITEMS[id].sell) { G.heldItem = id; shipHeld(); }
+    }
+  }
+};
+</script>
+</body>
+</html>
