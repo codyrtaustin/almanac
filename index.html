@@ -5,26 +5,33 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>ALMANAC</title>
 <!--
-  ALMANAC — Phase 1: The Farm & The Year
+  ALMANAC — Phases 1+2: The Farm & The Year / The Town
   Built against SPEC.md v1.0. Single file, Three.js r128, no storage APIs.
 
   DESIGN DECISIONS (unspecified in spec, chosen per pillars):
-  - Player character uses a live 3D chibi (spec §3 sanctioned fallback) instead of a
-    baked sprite atlas; the bake pipeline lands in phase 2 alongside the 12 villagers.
-  - Gameplay plane is flat (y=0); the "gentle fBm heightmap" is expressed visually via
-    the painted ground canvas + ridge scenery, keeping the character controller and
-    tile targeting simple. Walkable height variation deferred.
-  - Ground outside the farm field is one painted canvas texture (2px/m) rather than
-    tiles; the farm field itself is the tile grid with InstancedMesh overlays.
-  - Interiors are stubbed in phase 1: the farmhouse door prompts sleep, shop doors
-    open the shop panel behind a cream fade. Walkable single-room interiors in ph.2.
-  - Weather set for phase 1: sun / cloud / rain (autumn), sun / snow (winter).
-  - Fishing is deferred to phase 3 (not in phase-1 goal); foraging is included since
-    day-5's mini-reveal references forage income.
+  - Characters are baked at boot into sprite atlases (8 directions x 4 poses:
+    idle/step/step-back/tool) rendered under the headlamp light, displayed as
+    camera-facing billboard quads; live 3D chibis remain the automatic fallback
+    if the bake throws (§3). Low-stamina slump reads via swing speed + journal
+    tells rather than sprite tilt (billboards don't lean well).
+  - Gameplay plane is flat (y=0); the "gentle fBm heightmap" is expressed visually
+    via the painted ground canvas + ridge scenery. Walkable height deferred.
+  - Ground outside the farm field is one painted canvas texture (2px/m); the farm
+    field itself is the tile grid with InstancedMesh overlays.
+  - Interiors remain mini-scene stubs: farmhouse door prompts sleep, shop doors
+    open shop panels behind a cream fade. "Inside" villagers hide at their anchor.
+  - The spec names seven focus villagers but says "6 focus, 2 birthdays/season";
+    all seven (Bramm, Hetta, Corwin, Isolde, Rolf, Maren, Greta) get birthdays,
+    placed on days 1/3 of seasons so festivals stay clear.
+  - Gift hearts: loved +2 / liked +1 / disliked -1; birthday roughly x2-x5 via
+    doubling+bonus, keeping the 0-10 integer heart scale readable.
+  - Upgraded tools return by mail/gate drop rather than a pickup trip (one fewer
+    errand in 3-minute winter days); Hetta's letter keeps it diegetic.
+  - Ledger profit chips show last season's tagged income per crop (seed costs are
+    tagged Supplies, not per-crop, so "profit" = earnings; label reads as such).
+  - Weather set: sun / cloud / rain / snow. Fishing + festivals x4 land in ph.3.
   - Free turnip packet covers the 6x6 starter patch (36 seeds). Turnip check $216;
-    the winter coat is $75 and starting cash $40 so the day-4 squeeze always bites.
-  - NPC schedules in phase 1 are per-day scripted placements serving the Year-1
-    beats; full waypoint schedule skeletons arrive in phase 2.
+    the winter coat is $120 and starting cash $40 so the day-4 squeeze always bites.
   - Debug hooks exposed on window.ALMANAC for acceptance testing (harmless in play).
 -->
 <style>
@@ -265,6 +272,9 @@ const CONFIG = {
   NPC_SPEED: 3.2,
   INTERACT_DIST: 1.9,
   HOLD_MS: 340,                          // hold-E opens radial
+  BAKE_SPRITES: true,                    // baked billboards; live chibis on failure
+  TOOL_PRICES: { copper: 140 },          // per tool, 2-day forge turnaround
+  TOOL_TURNAROUND: 2,
 
   CROPS: {
     turnip:    { name: 'Turnip',     icon: '🥕', seasons: ['Autumn', 'Spring'], days: 2, seed: 20, sell: 6,  color: 0xE8E4EC, packet: 6 },
@@ -375,6 +385,9 @@ const G = {
   flags: {},               // persistent story flags
   ledger: { unlocked: false, entries: [] },  // {day, amount, enterprise, note}
   network: { connected: {} },
+  jobs: [],                // invoiced odd jobs
+  toolTiers: {},           // tool -> tier (0 base, 1 copper, …)
+  toolAway: null,          // {tool, backDay} while at the forge
   farmName: 'Sundrop Farm',
   playerName: 'You',
   look: { skin: 0, hair: 0, shirt: 0 },
@@ -1406,9 +1419,20 @@ const CAST = {
   sable:  { name: 'Sable',   skin: SKINS[0], hair: '#2E2620', shirt: '#5A4A6A', long: true }
 };
 
-const ACTORS = {};   // id -> actor (player + present villagers)
+const ACTORS = {};   // id -> actor (player + villagers)
 function makeActor(id, rec, x, z) {
-  const group = makeChibi(rec);
+  const group = new THREE.Group();
+  let sprite = null;
+  const bank = (typeof SpriteBank !== 'undefined') && SpriteBank[id];
+  if (bank) {
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(1.16, 1.74),
+      new THREE.MeshBasicMaterial({ map: bank.tex, transparent: true, alphaTest: 0.4 }));
+    quad.position.y = 0.84;
+    group.add(quad);
+    sprite = { quad, tex: bank.tex };
+  } else {
+    group.add(makeChibi(rec));
+  }
   group.position.set(x, 0, z);
   const blob = addBlob(group, 0, 0, 1.1, 0.8);
   blob.position.y = 0.01;
@@ -1416,7 +1440,7 @@ function makeActor(id, rec, x, z) {
   const a = {
     id, rec, group, x, z, face: Math.PI,             // face south (camera)
     speed: CONFIG.NPC_SPEED, waypoints: [], moving: false,
-    animT: 0, animFrame: 0, hopT: 0, blob, visible: true
+    animT: 0, animFrame: 0, hopT: 0, blob, visible: true, sprite
   };
   ACTORS[id] = a;
   return a;
@@ -1453,21 +1477,22 @@ function moveActor(a, dx, dz, dt) {
   if (positionFree(a.x, nz, a)) { a.z = nz; moved = true; }
   if (dx || dz) a.face = Math.atan2(dx, dz);
   a.group.position.set(a.x, a.group.position.y, a.z);
-  a.group.rotation.y = a.face;
+  if (!a.sprite) a.group.rotation.y = a.face;   // billboards keep camera-facing
   return moved;
 }
 function tickActorAnim(a, dt, walking) {
+  if (a.sprite) { updateSpriteFrame(a, walking, dt); return; }
   const swing = [0, 1, 0, -1];
   if (walking) {
     a.animT += dt;
     if (a.animT > 0.125) { a.animT = 0; a.animFrame = (a.animFrame + 1) % 4; }
   } else { a.animFrame = 0; }
-  let s = swing[a.animFrame] * 0.55;
+  const s = swing[a.animFrame] * 0.55;
   // low-stamina slump (player only, diegetic tell)
   let slump = 0;
   if (a.id === 'player' && G.stamina <= CONFIG.SLUMP_AT) slump = 0.12;
   if (a.id === 'player' && G.stamina <= CONFIG.SWEAT_AT) slump = 0.2;
-  const u = a.group.userData;
+  const u = a.group.children[0].userData;
   u.legs[0].rotation.x = s; u.legs[1].rotation.x = -s;
   u.arms[0].rotation.x = -s * 0.8; u.arms[1].rotation.x = s * 0.8;
   a.group.rotation.x = slump * 0.5;
@@ -1574,6 +1599,292 @@ function updateTargetHighlight(time) {
     R.target.material.color.set(valid ? 0xffffff : 0xE07060);
   }
   return act;
+}
+/* ====================== CAST: schedules (phase 2) ======================= */
+// Authored timed-waypoint skeletons resolved against the seed's placements,
+// perturbed by weather/Restday/arc stage. Positions interpolate; never teleport.
+const SCHED = { targets: {}, day: -1 };
+
+function placeOf(name) {
+  const W = G.world;
+  const shopFront = id => {
+    const s = W.shops.find(s => s.id === id);
+    return s ? { x: s.x + 1.2, z: s.z + s.d / 2 + 1.5 } : { x: W.gazebo.x, z: W.gazebo.z + 5 };
+  };
+  switch (name) {
+    case 'general': case 'forge': case 'carpenter': case 'clinic': case 'tavern':
+    case 'home1': case 'home2': return shopFront(name);
+    case 'square': return { x: W.gazebo.x - 2, z: W.gazebo.z + 5 };
+    case 'squareE': return { x: W.gazebo.x + 4, z: W.gazebo.z + 6 };
+    case 'bench': return { x: W.bench.x + 1.6, z: W.bench.z + 0.9 };
+    case 'benchFar': return { x: W.bench.x - 1.6, z: W.bench.z + 0.9 };
+    case 'dock': return { x: W.dock.x, z: W.dock.z - 1.2 };
+    case 'marker': return { x: W.marker.x + 2, z: W.marker.z + 4 };
+    case 'trailMid': return { x: W.trailX, z: -30 };
+    case 'bridge': return { x: W.bridge.x + 4, z: W.pathZ + 1 };
+    case 'farmGate': return { x: W.gate.x + 3, z: W.pathZ };
+    case 'ranch': return { x: W.ranchGate.x - 2, z: W.ranchGate.z + 1 };
+    case 'rolfField': return { x: W.ranchGate.x - 12, z: W.pathZ + 9 };
+    case 'forestA': return { x: W.trailX - 16, z: -18 };
+    case 'shorePath': return { x: (W.gazebo.x + W.pool.x) / 2, z: (W.gazebo.z + W.pool.z) / 2 };
+    default: return { x: W.gazebo.x, z: W.gazebo.z + 5 };
+  }
+}
+
+// Segment: {t, at, inside, leisure} — leisure segments collapse indoors in rain.
+function scheduleFor(id, day) {
+  const rest = isRestday(day);
+  const connectedBramm = !!G.network.connected.general;
+  switch (id) {
+    case 'bramm':
+      if (!rest) return [
+        { t: 6, at: 'general', inside: true },
+        { t: 8.5, at: 'general' },
+        { t: 12.5, at: 'square', leisure: true },
+        { t: 13.5, at: 'general' },
+        { t: 17.5, at: 'tavern', leisure: true },
+        { t: 20.5, at: 'general', inside: true }
+      ];
+      // Restday: the back-room books — until the network frees him (§12).
+      return connectedBramm ? [
+        { t: 8, at: 'general' },
+        { t: 13, at: 'general', inside: true },       // books take an hour now
+        { t: 14, at: 'benchFar', leisure: true },     // and the bench is on the way of his day
+        { t: 18.5, at: 'general', inside: true }
+      ] : [
+        { t: 8, at: 'general' },
+        { t: 13, at: 'general', inside: true },       // 13:00–18:00: receipts, ka-chunk
+        { t: 18.5, at: 'general', inside: true }
+      ];
+    case 'maren':
+      return [
+        { t: 7, at: 'tavern' },
+        { t: 11, at: 'square', leisure: true },
+        { t: 12.5, at: 'tavern' },
+        { t: 22, at: 'tavern', inside: true }
+      ];
+    case 'hetta':
+      if (rest) return [{ t: 8, at: 'forge', inside: true }, { t: 15, at: 'square', leisure: true }, { t: 19, at: 'forge', inside: true }];
+      return [
+        { t: 7.5, at: 'forge' },
+        { t: 17, at: 'tavern', leisure: true },
+        { t: 20.5, at: 'forge', inside: true }
+      ];
+    case 'corwin':
+      if (rest) return [{ t: 8, at: 'forestA', leisure: true }, { t: 14, at: 'shorePath', leisure: true }, { t: 19, at: 'carpenter', inside: true }];
+      return [
+        { t: 7, at: 'carpenter' },
+        { t: 12, at: 'forestA', leisure: true },
+        { t: 14, at: 'carpenter' },
+        { t: 18.5, at: 'tavern', leisure: true },
+        { t: 21, at: 'carpenter', inside: true }
+      ];
+    case 'isolde':
+      if (rest) return [{ t: 9, at: 'clinic', inside: true }, { t: 14, at: 'bench', leisure: true }, { t: 18, at: 'clinic', inside: true }];
+      return [
+        { t: 8.5, at: 'clinic' },
+        { t: 17.5, at: 'shorePath', leisure: true },
+        { t: 19.5, at: 'clinic', inside: true }
+      ];
+    case 'rolf':
+      // Pre-conversion: shoebox evenings at home, no tavern (§11 stage 0).
+      return [
+        { t: 6.5, at: 'rolfField' },
+        { t: 12.5, at: 'ranch', leisure: true },
+        { t: 13.5, at: 'rolfField' },
+        { t: 18, at: 'rolfField', inside: true }
+      ];
+    case 'greta':
+      return [
+        { t: 6, at: 'ranch' },
+        { t: 12.5, at: rest ? 'square' : 'general', leisure: true },
+        { t: 14.5, at: 'ranch' },
+        { t: 19, at: 'ranch', inside: true }
+      ];
+    case 'aldwin':
+      return [
+        { t: 8, at: 'square' },
+        { t: 11, at: 'bridge', leisure: true },
+        { t: 14, at: rest ? 'square' : 'farmGate', leisure: true },
+        { t: 17, at: 'tavern', leisure: true },
+        { t: 20, at: 'home1', inside: true }
+      ];
+    case 'ness':
+      return [{ t: 6, at: 'dock' }, { t: 21.5, at: 'dock', inside: true }];
+    case 'fen':
+      return [
+        { t: 7, at: 'trailMid' },
+        { t: 9.5, at: 'marker' },
+        { t: 16.5, at: 'trailMid' },
+        { t: 19, at: 'home1', inside: true }
+      ];
+    case 'pip':
+      if (rest) return [{ t: 8.5, at: 'forestA', leisure: true }, { t: 13, at: 'square', leisure: true }, { t: 18, at: 'home2', inside: true }];
+      return [
+        { t: 8, at: 'square', leisure: true },
+        { t: 11, at: 'forestA', leisure: true },
+        { t: 15, at: 'squareE', leisure: true },
+        { t: 18, at: 'home2', inside: true }
+      ];
+    case 'sable': {
+      if (rest) return [{ t: 9, at: 'bench' }, { t: 18.5, at: 'shorePath' }, { t: 21, at: 'bridge', inside: true }];
+      // weekdays wander, seeded by the calendar so loads never reshuffle
+      const r = calendarDay(day ^ 0x5AB1E).r;
+      const spots = ['bridge', 'trailMid', 'forestA', 'shorePath', 'dock', 'squareE'];
+      const s1 = spots[Math.floor(r() * spots.length)];
+      const s2 = spots[Math.floor(r() * spots.length)];
+      return [
+        { t: 8, at: s1, leisure: true },
+        { t: 13, at: s2, leisure: true },
+        { t: 19, at: 'bridge', inside: true }
+      ];
+    }
+  }
+  return [{ t: 8, at: 'square' }];
+}
+
+function buildCast() {
+  for (const id in CAST) {
+    if (!ACTORS[id]) makeActor(id, CAST[id], -999, -999);
+  }
+}
+
+function assembleSchedules(day) {
+  SCHED.day = day;
+  SCHED.plans = {};
+  const wet = G.weather === 'rain' || G.weather === 'snow';
+  for (const id in CAST) {
+    let segs = scheduleFor(id, day);
+    if (wet) {
+      // rain collapses leisure: stay wherever the previous segment put them
+      segs = segs.filter((s, i) => !(s.leisure && i > 0));
+    }
+    SCHED.plans[id] = segs;
+  }
+}
+
+// Overnight placement (behind the sleep fade): everyone starts the day where
+// their schedule says, no cross-valley dawn marches.
+function snapSchedules() {
+  if (!SCHED.plans) return;
+  for (const id in SCHED.plans) {
+    const a = ACTORS[id];
+    if (!a || a.scriptLock) continue;
+    const segs = SCHED.plans[id];
+    let cur = segs[0];
+    for (const s of segs) if (s.t <= G.hour) cur = s;
+    const p = placeOf(cur.at);
+    actorSetPos(a, p.x + (rand('live') - 0.5) * 1.4, p.z + (rand('live') - 0.5) * 1.4);
+    a.schedKey = cur.at + (cur.inside ? '!' : '');
+    a.visible = !cur.inside; a.group.visible = !cur.inside;
+    a.waypoints = [];
+  }
+}
+
+function tickSchedules() {
+  if (!SCHED.plans || G.mode === 'scene') return;
+  for (const id in SCHED.plans) {
+    const a = ACTORS[id];
+    if (!a || a.scriptLock) continue;
+    const segs = SCHED.plans[id];
+    let cur = segs[0];
+    for (const s of segs) if (s.t <= G.hour) cur = s;
+    const key = cur.at + (cur.inside ? '!' : '');
+    if (a.schedKey !== key) {
+      a.schedKey = key;
+      const p = placeOf(cur.at);
+      a.visible = true;
+      a.group.visible = true;
+      a.waypoints = [{ x: p.x, z: p.z, onArrive: cur.inside ? () => {
+        a.visible = false; a.group.visible = false;
+      } : null }];
+    }
+  }
+}
+/* ================= CAST: sprite bake pipeline (phase 2) ================== */
+// Bake each code-built chibi under the headlamp light from 8 directions ×
+// 4 poses (idle / step / step-back / tool) into a canvas atlas; display as
+// camera-facing billboard quads, nearest-filtered. Live-3D chibi remains the
+// automatic fallback if baking fails (§3).
+const SpriteBank = {};   // id -> { tex, cols, rows, fw, fh }
+const BAKE = { fw: 64, fh: 96, cols: 4, rows: 8 };
+
+function bakeAllSprites() {
+  if (!CONFIG.BAKE_SPRITES) return;
+  let rend = null;
+  try {
+    rend = new THREE.WebGLRenderer({ antialias: false, alpha: true, preserveDrawingBuffer: true });
+    rend.setSize(BAKE.fw, BAKE.fh, false);
+    rend.setPixelRatio(1);
+    rend.setClearColor(0x000000, 0);
+    const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 0.78));
+    const dir = new THREE.DirectionalLight(0xfff4e0, 0.55);
+    // headlamp geometry matched to the play camera's elevation
+    dir.position.set(0, 2.8, 2.4);
+    scene.add(dir); scene.add(dir.target);
+    dir.target.position.set(0, 0.7, 0);
+    dir.target.updateMatrixWorld();
+    const cam = new THREE.OrthographicCamera(-0.62, 0.62, 1.36, -0.5, 0.1, 20);
+    cam.position.set(0, 2.8, 2.4);
+    cam.lookAt(0, 0.62, 0);
+    const jobs = Object.keys(CAST).map(id => [id, CAST[id]]);
+    jobs.push(['player', playerRecipe()]);
+    for (const [id, rec] of jobs) {
+      const chibi = makeChibi(rec);
+      scene.add(chibi);
+      const atlas = document.createElement('canvas');
+      atlas.width = BAKE.fw * BAKE.cols; atlas.height = BAKE.fh * BAKE.rows;
+      const ctx = atlas.getContext('2d');
+      const u = chibi.userData;
+      for (let d = 0; d < 8; d++) {
+        chibi.rotation.y = d * Math.PI / 4;
+        for (let c = 0; c < BAKE.cols; c++) {
+          const swing = c === 0 ? 0 : c === 1 ? 0.55 : c === 2 ? -0.55 : 0;
+          u.legs[0].rotation.x = swing; u.legs[1].rotation.x = -swing;
+          u.arms[0].rotation.x = -swing * 0.8; u.arms[1].rotation.x = swing * 0.8;
+          if (c === 3) { u.arms[0].rotation.x = -2.1; u.arms[1].rotation.x = -2.1; }   // tool raise
+          rend.render(scene, cam);
+          ctx.drawImage(rend.domElement, c * BAKE.fw, d * BAKE.fh);
+        }
+      }
+      scene.remove(chibi);
+      const tex = nearestTex(atlas);
+      tex.repeat.set(1 / BAKE.cols, 1 / BAKE.rows);
+      SpriteBank[id] = { tex, fw: BAKE.fw, fh: BAKE.fh };
+    }
+  } catch (e) {
+    // fallback: live 3D chibis (reads 95% right under the same lighting)
+    for (const k in SpriteBank) delete SpriteBank[k];
+    console.warn('sprite bake failed; using live chibis', e);
+  } finally {
+    if (rend) rend.dispose();
+  }
+}
+
+function dirIndexFromFace(face) {
+  const tau = Math.PI * 2;
+  return Math.round(((face % tau) + tau) % tau / (Math.PI / 4)) % 8;
+}
+
+function updateSpriteFrame(a, walking, dt) {
+  const s = a.sprite;
+  // billboard: face the (fixed-yaw) camera
+  s.quad.quaternion.copy(R.camera.quaternion);
+  if (walking) {
+    a.animT += dt;
+    if (a.animT > 0.125) { a.animT = 0; a.animFrame = (a.animFrame + 1) % 4; }
+  } else a.animFrame = 0;
+  let col = [0, 1, 0, 2][a.animFrame];
+  if (a.hopT > 0) {
+    a.hopT -= dt;
+    col = 3;
+    a.group.position.y = Math.max(0, Math.sin((1 - a.hopT / 0.18) * Math.PI) * 0.16);
+    if (a.hopT <= 0) a.group.position.y = 0;
+  }
+  const row = dirIndexFromFace(a.face);
+  // atlas row 0 is direction 0 at the TOP of the canvas; UV v runs bottom-up
+  s.tex.offset.set(col / BAKE.cols, 1 - (row + 1) / BAKE.rows);
 }
 /* ================================ ITEMS ================================== */
 const ITEMS = {};
@@ -1723,8 +2034,22 @@ function rollover(newDay) {
   }
   // 5. weather
   G.weather = newWeather;
-  // 6-7. respawns + villager schedules  (story hook places the cast)
-  // 8. mail / festival / arc flags       (story hook)
+  // 6-7. forage respawn (below) + villager schedules
+  if (typeof assembleSchedules === 'function') assembleSchedules(newDay);
+  // 8. mail / festival / arc flags
+  if (typeof processJobInvoices === 'function') {
+    processJobInvoices(newDay);
+    maybeGenerateJob(newDay);
+  }
+  // forge turnaround: upgraded tools come back
+  if (G.toolAway && G.toolAway.backDay <= newDay) {
+    G.toolTiers = G.toolTiers || {};
+    G.toolTiers[G.toolAway.tool] = (G.toolTiers[G.toolAway.tool] || 0) + 1;
+    G.mail.push({ day: newDay, from: 'Hetta', title: 'Your ' + G.toolAway.tool + ', reborn',
+      body: 'Left your copper ' + G.toolAway.tool + ' by your gate before sunup. Swing it with some respect. — H.', read: false });
+    jline('Hetta returned the ' + G.toolAway.tool + ' — copper now, lighter than it has any right to be.');
+    G.toolAway = null;
+  }
   // 9. contract fulfillment — phase 3
   const seasonChanged = seasonOf(newDay) !== seasonOf(prevDay);
   G.day = newDay;
@@ -1800,13 +2125,24 @@ function performAction() {
 }
 function hop() { const p = player(); p.hopT = 0.18; }
 
+function toolCost(tool) {
+  const tier = (G.toolTiers || {})[tool] || 0;
+  return Math.max(1, CONFIG.STAMINA_COST[tool] - tier);
+}
+function toolIsAway(tool) {
+  if (G.toolAway && G.toolAway.tool === tool) {
+    toast('Your ' + tool + ' is at the forge — back ' + dayName(G.toolAway.backDay) + '.');
+    return true;
+  }
+  return false;
+}
 function doTileAction(tt) {
   const t = tt.t;
   const held = G.heldItem;
   const heldSeed = held && ITEMS[held] && ITEMS[held].seedOf;
-  if (t.obj === 'weed') { t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(CONFIG.STAMINA_COST.sickle); hop(); sfx('thud'); firstClear(); }
-  else if (t.obj === 'rock') { t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(CONFIG.STAMINA_COST.hammer); hop(); sfx('thud'); firstClear(); }
-  else if (t.obj === 'stump') { t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(CONFIG.STAMINA_COST.axe); hop(); sfx('thud'); firstClear(); }
+  if (t.obj === 'weed') { if (toolIsAway('sickle')) return; t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(toolCost('sickle')); hop(); sfx('thud'); firstClear(); }
+  else if (t.obj === 'rock') { if (toolIsAway('hammer')) return; t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(toolCost('hammer')); hop(); sfx('thud'); firstClear(); }
+  else if (t.obj === 'stump') { if (toolIsAway('axe')) return; t.obj = null; if (t.s === 'wild') t.s = 'clear'; spendStamina(toolCost('axe')); hop(); sfx('thud'); firstClear(); }
   else if (t.obj === 'boulder' || t.obj === 'log') { toast('Too big for your tools — Hetta could help, come spring.'); return; }
   else if (t.crop && t.dead) { t.crop = null; t.grown = 0; t.dead = false; hop(); sfx('thud'); toast('Cleared the withered plant.'); }
   else if (t.crop && cropVisualStage(t) === 3) {
@@ -1815,7 +2151,7 @@ function doTileAction(tt) {
     G.dayFlags.harvested = (G.dayFlags.harvested || 0) + 1;
     if (!G.flags.firstHarvest) { G.flags.firstHarvest = true; jline('First harvest. They’re small and a little lopsided and I grew them.'); }
   }
-  else if (t.crop) { t.watered = true; spendStamina(CONFIG.STAMINA_COST.can); hop(); sfx('plink'); }
+  else if (t.crop) { if (toolIsAway('can')) return; t.watered = true; spendStamina(toolCost('can')); hop(); sfx('plink'); }
   else if (t.s === 'till' && heldSeed) {
     const crop = CONFIG.CROPS[heldSeed];
     if (!crop.seasons.includes(seasonOf(G.day))) { toast('Not the season for ' + crop.name.toLowerCase() + '.'); return; }
@@ -1825,8 +2161,8 @@ function doTileAction(tt) {
     hop(); sfx('plink');
     if (!G.flags.firstPlant) { G.flags.firstPlant = true; jline('Put the first seeds in the ground. Now we both wait.'); }
   }
-  else if (t.s === 'till') { t.watered = true; spendStamina(CONFIG.STAMINA_COST.can); hop(); sfx('plink'); }
-  else if (t.s === 'clear') { t.s = 'till'; spendStamina(CONFIG.STAMINA_COST.hoe); hop(); sfx('thud'); }
+  else if (t.s === 'till') { if (toolIsAway('can')) return; t.watered = true; spendStamina(toolCost('can')); hop(); sfx('plink'); }
+  else if (t.s === 'clear') { if (toolIsAway('hoe')) return; t.s = 'till'; spendStamina(toolCost('hoe')); hop(); sfx('thud'); }
   TL.dirty = true;
   STORY.checkObjectives();
 }
@@ -1869,7 +2205,8 @@ function saveEncode() {
     shipped: G.todayShipped, mail: G.mail, journal: G.journal,
     flags: G.flags, ledger: G.ledger, network: G.network,
     farmName: G.farmName, playerName: G.playerName, look: G.look,
-    hearts: G.hearts, tiles
+    hearts: G.hearts, jobs: G.jobs || [], toolTiers: G.toolTiers || {},
+    toolAway: G.toolAway || null, tiles
   };
   return b64encode(JSON.stringify(data));
 }
@@ -1896,10 +2233,12 @@ function applySave(data) {
   G.network = data.network || { connected: {} };
   G.farmName = data.farmName; G.playerName = data.playerName; G.look = data.look || G.look;
   G.hearts = data.hearts || {};
+  G.jobs = data.jobs || []; G.toolTiers = data.toolTiers || {}; G.toolAway = data.toolAway || null;
   G.weather = weatherFor(G.day);
   location.hash = '#s=' + data.seed;
   buildWorldScene();
   for (const id in ACTORS) removeActor(id);
+  bakeAllSprites();
   const W = G.world;
   spawnPlayer(W.house.x, W.house.z + W.house.d / 2 + 1.6);
   STORY.onDayStart(G.day, true);
@@ -1918,6 +2257,452 @@ function downloadSave() {
   a.download = (G.farmName || 'almanac').replace(/\s+/g, '_').toLowerCase() + '_y' + yearOf(G.day) + '.almanac';
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+/* ==================== CAST: social layer (phase 2) ======================= */
+// Gift preferences are trait-consistent and learnable by reasoning (§9).
+// Birthdays: the focus villagers, spread 2 per season off festival days.
+const SOCIAL = {
+  prefs: {
+    bramm:  { loved: ['strawberry', 'berries', 'honeycomb'], liked: ['walnut', 'carrot'], disliked: ['wintergreen'] },
+    hetta:  { loved: ['potato', 'wildleek'], liked: ['mushroom', 'walnut'], disliked: ['daffodil'] },
+    corwin: { loved: ['walnut', 'pinecone'], liked: ['berries', 'mushroom'], disliked: [] },
+    isolde: { loved: ['wintergreen', 'daffodil'], liked: ['cucumber', 'bokchoy'], disliked: ['mushroom'] },
+    rolf:   { loved: ['carrot', 'potato'], liked: ['turnip', 'bokchoy'], disliked: ['daffodil'] },
+    maren:  { loved: ['wildleek', 'mushroom'], liked: ['cucumber', 'bokchoy', 'turnip'], disliked: [] },
+    greta:  { loved: ['honeycomb', 'strawberry'], liked: ['carrot', 'berries'], disliked: ['mushroom'] },
+    aldwin: { loved: ['daffodil', 'pinecone'], liked: ['walnut', 'wintergreen'], disliked: [] },
+    ness:   { loved: ['mushroom', 'walnut'], liked: ['pinecone'], disliked: ['daffodil'] },
+    fen:    { loved: ['daffodil', 'pinecone'], liked: ['wintergreen'], disliked: ['honeycomb'] },
+    pip:    { loved: ['berries', 'strawberry'], liked: ['honeycomb', 'cucumber'], disliked: ['wintergreen'] },
+    sable:  { loved: ['wintergreen', 'walnut'], liked: ['mushroom', 'pinecone'], disliked: [] }
+  },
+  // absolute day-of-year (0..11): spring 0-2, summer 3-5, autumn 6-8, winter 9-11
+  birthdays: { hetta: 0, greta: 2, corwin: 3, maren: 5, isolde: 6, rolf: 8, bramm: 9 }
+};
+function isBirthday(id, day) { return SOCIAL.birthdays[id] === day % 12; }
+
+/* ---- portraits v2: authored busts with expressions ---- */
+const PORTRAIT_EXTRA = {
+  bramm: { brows: 'heavy', beard: true }, hetta: { bandana: true },
+  corwin: { freckles: true }, isolde: { glasses: true }, rolf: { brows: 'heavy', stubble: true },
+  maren: { blush: true }, greta: { freckles: true }, aldwin: { beard: true, glasses: true },
+  ness: { beard: true, brows: 'heavy' }, fen: { blush: true }, pip: { freckles: true }, sable: {}
+};
+function drawPortraitTo(ctx, id, mood, size) {
+  const rec = CAST[id] || playerRecipe();
+  const ex = PORTRAIT_EXTRA[id] || {};
+  const s = (size || 84) / 84;
+  ctx.save();
+  ctx.scale(s, s);
+  ctx.clearRect(0, 0, 84, 84);
+  ctx.fillStyle = '#E8DFC4'; ctx.fillRect(0, 0, 84, 84);
+  ctx.fillStyle = rec.shirt;
+  ctx.beginPath(); ctx.ellipse(42, 86, 30, 26, 0, Math.PI, 0); ctx.fill();
+  ctx.fillStyle = rec.skin;
+  ctx.beginPath(); ctx.arc(42, 42, 24, 0, 7); ctx.fill();
+  // hair
+  ctx.fillStyle = rec.hair;
+  ctx.beginPath(); ctx.arc(42, 36, 26, Math.PI * 1.02, Math.PI * 1.98); ctx.fill();
+  if (rec.long) { ctx.fillRect(16, 34, 9, 34); ctx.fillRect(59, 34, 9, 34); }
+  if (ex.bandana) {
+    ctx.fillStyle = '#B3574C';
+    ctx.beginPath(); ctx.arc(42, 34, 25, Math.PI * 1.05, Math.PI * 1.95); ctx.fill();
+  }
+  if (rec.hat) {
+    ctx.fillStyle = rec.hat;
+    ctx.fillRect(13, 18, 58, 8); ctx.fillRect(25, 5, 34, 15);
+  }
+  // face
+  const eyeY = 44;
+  ctx.fillStyle = '#2E2620';
+  if (mood === 'happy') {   // closed happy arcs
+    ctx.lineWidth = 2.4; ctx.strokeStyle = '#2E2620';
+    ctx.beginPath(); ctx.arc(34, eyeY + 1, 3.4, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+    ctx.beginPath(); ctx.arc(50, eyeY + 1, 3.4, Math.PI * 1.1, Math.PI * 1.9); ctx.stroke();
+  } else if (mood === 'surprised') {
+    ctx.beginPath(); ctx.arc(34, eyeY, 3.6, 0, 7); ctx.arc(50, eyeY, 3.6, 0, 7); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(35, eyeY - 1, 1.2, 0, 7); ctx.arc(51, eyeY - 1, 1.2, 0, 7); ctx.fill();
+    ctx.fillStyle = '#2E2620';
+  } else {
+    ctx.beginPath(); ctx.arc(34, eyeY, 2.6, 0, 7); ctx.arc(50, eyeY, 2.6, 0, 7); ctx.fill();
+  }
+  if (ex.glasses) {
+    ctx.strokeStyle = '#4E4438'; ctx.lineWidth = 1.6;
+    ctx.strokeRect(28, eyeY - 5, 12, 9); ctx.strokeRect(44, eyeY - 5, 12, 9);
+    ctx.beginPath(); ctx.moveTo(40, eyeY - 1); ctx.lineTo(44, eyeY - 1); ctx.stroke();
+  }
+  // brows
+  ctx.strokeStyle = ex.brows === 'heavy' ? '#2E2620' : '#4E4438';
+  ctx.lineWidth = ex.brows === 'heavy' ? 3 : 1.8;
+  const browTilt = mood === 'sad' ? 2.5 : mood === 'surprised' ? -3 : 0;
+  ctx.beginPath(); ctx.moveTo(29, 37 + browTilt); ctx.lineTo(38, 37 - browTilt * 0.4); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(46, 37 - browTilt * 0.4); ctx.lineTo(55, 37 + browTilt); ctx.stroke();
+  // mouth
+  ctx.strokeStyle = '#5a4034'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (mood === 'happy') ctx.arc(42, 52, 6, Math.PI * 0.15, Math.PI * 0.85);
+  else if (mood === 'sad') ctx.arc(42, 60, 6, Math.PI * 1.15, Math.PI * 1.85);
+  else if (mood === 'surprised') { ctx.arc(42, 56, 3, 0, 7); }
+  else { ctx.moveTo(37, 55); ctx.lineTo(47, 55); }
+  ctx.stroke();
+  if (ex.beard) {
+    ctx.fillStyle = rec.hair;
+    ctx.beginPath(); ctx.arc(42, 57, 12, Math.PI * 0.1, Math.PI * 0.9); ctx.fill();
+  }
+  if (ex.stubble) {
+    ctx.fillStyle = 'rgba(70,55,40,0.25)';
+    ctx.beginPath(); ctx.arc(42, 56, 11, Math.PI * 0.1, Math.PI * 0.9); ctx.fill();
+  }
+  if (ex.freckles) {
+    ctx.fillStyle = 'rgba(140,95,60,0.5)';
+    for (const [fx, fy] of [[30, 49], [33, 51], [51, 49], [54, 51], [48, 51]]) ctx.fillRect(fx, fy, 1.6, 1.6);
+  }
+  if (ex.blush || mood === 'happy') {
+    ctx.fillStyle = 'rgba(214,120,100,0.28)';
+    ctx.beginPath(); ctx.ellipse(30, 50, 4, 2.5, 0, 0, 7); ctx.ellipse(54, 50, 4, 2.5, 0, 0, 7); ctx.fill();
+  }
+  ctx.restore();
+}
+
+/* ---- line banks (phase 2 v1: slotted by flags/season/weather/hearts) ----
+   Verbal tics: Bramm trails off gruffly ("Hm."), Hetta forges metaphors,
+   Corwin exclaims, Isolde parentheticals, Rolf talks streaks, Maren hosts,
+   Greta livestock similes, Aldwin sermons drily, Ness minimalist, Fen quiet
+   certainties, Pip superlatives, Sable notebook fragments. */
+const LINES = {
+  bramm: {
+    base: [
+      'Need something? It’s on a shelf. Everything’s on a shelf. That’s retail. Hm.',
+      'My father ran this store, and his before him. Inventory outlives everybody. Hm.',
+      'You want advice? Buy seeds early, complain late. That’s the whole almanac.',
+      'Don’t lean on the counter. …Fine, lean. You’ve earned a lean.'
+    ],
+    rest: ['Store’s shut. I’m only out here blinking daylight between ledger columns. Hm.'],
+    restFree: ['Shut today. Books took an hour — an HOUR — and now the day’s just… mine. Still deciding what to do with a thing like that.'],
+    rain: ['Rain’s good for exactly two things: turnips and my roof’s sense of drama.'],
+    winter: ['Cold keeps the browsers out and the buyers honest. Hm.'],
+    heartHigh: ['You. You’re alright. Don’t make a thing of it.'],
+    loved: 'Sweet tooth’s a family curse. …This is exactly the good kind. Hm. Thank you.',
+    liked: 'Huh. Decent. I’ll take it before you rethink it.',
+    disliked: 'That’s… medicinal, is what that is. Keep it.',
+    birthday: 'You knew the date? Even the calendar barely knows the date. Well. Hm. Thank you.'
+  },
+  hetta: {
+    base: [
+      'That hoe of yours has one season left in it. When it quits, come see me — copper first, then we talk iron.',
+      'Everything worth having gets forged twice. Once in the fire, once in the using.',
+      'A dull sickle costs you more than a sharp one ever will. That’s not philosophy, that’s arithmetic.',
+      'You swing like someone who’s learning. Good. Learners buy better tools.'
+    ],
+    rest: ['Forge is cold on Restdays. Even fire takes a day.'],
+    rain: ['Rain on a hot forge roof — best sound in the valley, and I’ll fight anyone who says the river.'],
+    winter: ['Winter’s the forge’s season. Everything else slows down; the fire doesn’t.'],
+    heartHigh: ['I don’t sharpen for just anyone at this hour. You’re not just anyone. Hand it over.'],
+    loved: 'A thing with substance. You get it. Most people bring a smith flowers, if you can believe that.',
+    liked: 'Solid. Like a good billet. Thanks.',
+    disliked: 'Flowers. Near a forge. Bold choice, friend, and the wrong one.',
+    birthday: 'Another year, still swinging. You remembered — that’s worth more than the gift. Almost.'
+  },
+  corwin: {
+    base: [
+      'Corwin! Carpentry! You knew that. I just like saying it!',
+      'Your porch has GREAT bones. Bones deserve floors! Eventually! Save up!',
+      'Measure twice, cut once, brag forever. That’s the trade!',
+      'I walked the ridge trail this morning. That old marker keeps better corners than most houses I’ve met.'
+    ],
+    rest: ['No saw today! Restday rule. The trees appreciate the irony.'],
+    rain: ['Rain! Wood hates it, mushrooms love it, and I’m with the mushrooms today!'],
+    heartHigh: ['You know what — when it’s time for your kitchen, I’m doing the corners myself. No apprentice work for you!'],
+    loved: 'From the WOODS! You went into my favorite place and brought a piece back! Look at it!',
+    liked: 'Hey, that’s a good one! Right in the lunch pail it goes!',
+    disliked: 'Oh! That’s… I’ll find a use! I find uses!',
+    birthday: 'A birthday gift?! The valley remembers me! I’m building YOU something one day, mark it!'
+  },
+  isolde: {
+    base: [
+      'Oh — hello. You look like farming. (That’s not a diagnosis. Mostly.)',
+      'Rest is medicine. People pay me to say more complicated things, but that’s the spine of it.',
+      'I reread the same book every winter. It changes. (I know it’s me that changes. Let me have this.)',
+      'Drink water before you’re thirsty. The well is closer than you act like it is.'
+    ],
+    tired: ['You’re carrying your shoulders like a full watering can. Sit down for a minute. (Doctor’s orders. Informally.)'],
+    exhausted: ['Please go to bed. I’m saying it as a friend AND as the only doctor for eleven miles.'],
+    rest: ['The clinic’s closed. Bodies heal on schedule anyway. (Mostly. Knock if it’s real.)'],
+    rain: ['Rain days fill my waiting room with sniffles and my afternoon with reading. A fair trade.'],
+    heartHigh: ['I set a cup of the good tea aside when I heard you coming. (The kettle hears everything.)'],
+    loved: 'Oh — this is exactly the useful kind. I press these. For science. (And a little for the smell.)',
+    liked: 'That’s kind. Genuinely. (I’m writing it in the good column.)',
+    disliked: 'I… can’t verify the species. I’m going to decline, politely, and live.',
+    birthday: '(You knew?) I don’t advertise it. Thank you. This is — thank you.'
+  },
+  rolf: {
+    base: [
+      'Watering streak. Write it down. A pumpkin remembers every day you skipped — that’s the whole game, neighbor.',
+      'Farming’s showing up. Everything else is decoration.',
+      'Saw your field from the road. Coming along. Slower than mine, but coming along.',
+      'Don’t buy fancy seeds till your plain ones respect you.'
+    ],
+    rest: ['No such thing as a Restday for livestock or paperwork. One of those I like.'],
+    evening: ['Can’t stop. Receipts don’t sort themselves. Nothing in that shoebox sorts itself. Nothing.'],
+    winter: ['Winter’s when a farm shows you its books. Mine and I are… negotiating.'],
+    heartHigh: ['You show up. Day after day. That’s the only compliment I have and you just got all of it.'],
+    loved: 'Grown, not bought. You’re learning what matters. Next year’s fair just got interesting.',
+    liked: 'Decent crop. I’d have watered it one more day. Take that free.',
+    disliked: 'A flower. To a farmer. In work season. …Thanks.',
+    birthday: 'Didn’t tell anyone the date. Somebody talked. …Appreciated, neighbor. Quietly.'
+  },
+  maren: {
+    base: [
+      'The Bluebird’s always warmer than it looks! Come by after dark and prove me right.',
+      'A town runs on three things: weather, gossip, and soup. I stock two reliably.',
+      'You’re the best news this valley’s had in years — and I say that professionally. I traffic in news.',
+      'Eat something before you swing that hoe again. Innkeeper’s intuition.'
+    ],
+    rest: ['Restday! Tavern opens at dusk and the whole valley shows up. Even the quiet ones. ESPECIALLY the quiet ones.'],
+    rain: ['Rain fills the tavern by four. Best business weather there is — don’t tell the farmers.'],
+    heartHigh: ['Your stool’s the third from the left now. It knows you. That’s not nothing around here.'],
+    loved: 'Straight into tonight’s pot, and I’m naming the dish after you. Sit down, first bowl’s yours.',
+    liked: 'Kitchen thanks you! I thank you! The soup remains neutral!',
+    disliked: 'I’ll… find a shelf for it. Every tavern needs a mystery shelf.',
+    birthday: 'You remembered MY day? I’m the one who remembers days! Oh, sit DOWN, you’re getting pie.'
+  },
+  greta: {
+    base: [
+      'Up before the roosters again. It embarrasses them. Somebody has to.',
+      'Hens in spring, if you’ve got the coop. Come see me and nobody else.',
+      'You can tell a farm’s health by its fences and its farmer’s boots. Yours are getting honest.',
+      'Animals don’t care about your plans. That’s the best thing about them.'
+    ],
+    rest: ['Stock doesn’t take Restdays, so I take half of one. The math works if you don’t check it.'],
+    winter: ['Winter feed’s dear. Every year I say I’ll plan better, and every year the cows forgive me.'],
+    heartHigh: ['When you’re ready for animals, you’ll get my best layer. Not the spare — the best. That’s a promise now.'],
+    loved: 'Sweet as a first egg! Where do you keep finding these? Don’t tell Bramm — he’ll charge us for knowing.',
+    liked: 'Good and useful. Like a calm mare. Thank you kindly.',
+    disliked: 'Mushrooms make me think of damp barns, and damp barns keep me up nights. No offense meant.',
+    birthday: 'You remembered before the animals did! Well — the goose knew. The goose always knows.'
+  },
+  aldwin: {
+    base: [
+      'A fine morning to be retired in. I intend to waste none of it usefully.',
+      'Thirty years an extension agent. I can grade soil by smell and meetings by chair count.',
+      'Patience is a crop. Nobody plants it on purpose.',
+      'The valley’s older than its problems. I find that cheering, on the right afternoon.'
+    ],
+    flyer: ['The flyer still in your pocket? Good. Paper remembers what people mean to get to.'],
+    postConnect: ['Bramm’s glyph is the greenest thing in this valley including the pastures. I take no credit. I take perhaps a fifth of the credit.'],
+    rest: ['Even scripture rests a day in seven. The valley does it one in three. We were always ambitious here.'],
+    heartHigh: ['You listen like the land does. Slowly, and then all at once. It’s a compliment; take it home.'],
+    loved: 'Spring’s first argument for optimism, hand-delivered. Bless you.',
+    liked: 'A sensible gift. The best kind, second only to the impractical kind.',
+    disliked: 'I’ll pass it along. Somewhere there’s a right home for everything. Not here, but somewhere.',
+    birthday: 'At my age one hides the date out of arithmetic, not vanity. Yet here you are. Well done.'
+  },
+  ness: {
+    base: [
+      'River’s honest. Cold, but honest.',
+      'Fish don’t care what day it is. Sensible.',
+      'You want quiet, the dock’s got extra.',
+      'Ness. Still fishing. That’s the update.'
+    ],
+    rain: ['Good rain. Fish rise. People leave. Perfect weather.'],
+    rest: ['Restday. Same as any day, plus tavern noise at dusk. I’ll allow it.'],
+    heartHigh: ['You can share the dock. Left side. Don’t talk much. …You’re fine.'],
+    loved: 'Bait or breakfast, that works twice. Good find.',
+    liked: 'Hm. Useful. Thanks.',
+    disliked: 'What am I meant to do with a flower on a dock.',
+    birthday: 'How’d you — …Pip. Right. Well. Thanks.'
+  },
+  fen: {
+    base: [
+      'The marker likes being swept. Some questions end there.',
+      'The trail knows your boots now. It took a season. That’s fast, for a trail.',
+      'Leave the ledge be, or leave something on it. Both are fine. It knows the difference.',
+      'Quiet up here. It’s not empty. Those are different things.'
+    ],
+    dusk: ['Walk soft near the treeline at dusk. Sometimes the valley walks back.'],
+    rest: ['Restdays I sweep twice. Once for the week behind, once for the one coming.'],
+    heartHigh: ['The marker’s used to you now. I can tell. No, I won’t say how.'],
+    loved: 'For the ledge, or for me? …Either way, it’s right. Thank you.',
+    liked: 'That’s kind. The trail will know.',
+    disliked: 'The bees needed that more than I do. But the thought was clean.',
+    birthday: 'I don’t keep my own date. You kept it for me. That’s… I’ll sweep the overlook today.'
+  },
+  pip: {
+    base: [
+      'I know where ALL the berries are! ALL of them! It’s not a secret if I only tell you!',
+      'I raced the river from the bridge to the bend. The river CHEATED.',
+      'Old Ness said I talk too much and then taught me THREE knots. Adults are weird.',
+      'When I grow up I’m going to farm AND fish AND run the fair. All three. It’s decided.'
+    ],
+    rain: ['Rain means worms means fishing means I’m ALREADY LATE—'],
+    rest: ['Restday is the BEST day! Nobody has chores they’ll admit to!'],
+    heartHigh: ['Okay. OKAY. The secret berry spot. Past the big rock, THIRD pine, look DOWN. Tell no one. Blood oath.'],
+    loved: 'BERRIES! You’re officially my favorite grown-up! Don’t tell the others! Actually — do!',
+    liked: 'Ooh, that’s good, trade you a berry fact for it: the reddest ones lie!',
+    disliked: 'Bleh. BLEH. Tastes like the clinic smells.',
+    birthday: 'How is it not everyone’s favorite day?? Cake exists BECAUSE of today!'
+  },
+  sable: {
+    base: [
+      'Just walking. The valley reads differently every day — someone should keep up with the drafts.',
+      'Notebook says: fog on the ridge by nine, gone by ten. Some facts are just visits.',
+      'I’ve lived in four towns. This is the first one that didn’t ask why. I’m still deciding what that means.',
+      'The bridge has the best acoustics for thinking. The bench has the best silence. Different tools.'
+    ],
+    rest: ['The bench and I have an arrangement. It holds still; I stay long enough to notice something worth keeping.'],
+    benchShared: ['…The shopkeeper sat here last Restday. Didn’t say much. Said it well, though.'],
+    rain: ['Rain rewrites the whole valley in a softer hand. I try to read fast.'],
+    heartHigh: ['I wrote you into the notebook. Small entry. They’re all small. The good ones especially.'],
+    loved: 'Bitter and green and honest. You read me correctly. Not everyone bothers.',
+    liked: 'Accepted, and noted. The notebook keeps accounts too, in its way.',
+    disliked: 'Hm. Not for me — but the gesture lands. Gestures usually do.',
+    birthday: 'I don’t recall telling anyone my date. …I don’t recall minding, either. Thank you.'
+  }
+};
+
+function pickTalkLine(id) {
+  const B = LINES[id];
+  if (!B) return '…';
+  const season = seasonOf(G.day), rest = isRestday(G.day);
+  const hearts = G.hearts[id] || 0;
+  const pool = [];
+  // priority slots
+  if (id === 'isolde' && G.stamina <= 25 && B.exhausted) return B.exhausted[0];
+  if (id === 'isolde' && G.stamina <= 50 && B.tired) return B.tired[0];
+  if (id === 'aldwin' && G.network.connected.general && B.postConnect && rand('live') < 0.4) return B.postConnect[0];
+  if (id === 'aldwin' && G.flags.flyerTaken && !G.network.connected.general && B.flyer) return B.flyer[0];
+  if (id === 'rolf' && G.hour >= 17 && B.evening && rand('live') < 0.6) return B.evening[0];
+  if (id === 'bramm' && rest && G.network.connected.general && B.restFree) return B.restFree[0];
+  if (id === 'sable' && rest && G.flags.shoreWitnessed && B.benchShared && rand('live') < 0.5) return B.benchShared[0];
+  if (id === 'fen' && (G.hour >= 17 || G.hour < 8) && B.dusk && rand('live') < 0.5) return B.dusk[0];
+  if (rest && B.rest) pool.push(...B.rest);
+  if ((G.weather === 'rain') && B.rain) pool.push(...B.rain, ...(B.rain || []));
+  if (season === 'Winter' && B.winter) pool.push(...B.winter);
+  if (hearts >= 5 && B.heartHigh) pool.push(...B.heartHigh);
+  pool.push(...B.base);
+  return pool[Math.floor(rand('live') * pool.length)];
+}
+
+/* ---- gifts ---- */
+function giftableHeld() {
+  const id = G.heldItem;
+  if (!id || !ITEMS[id]) return null;
+  if (ITEMS[id].seedOf || id === 'coat' || id === 'scarf') return null;
+  return id;
+}
+function giveGift(npc) {
+  const itemId = giftableHeld();
+  if (!itemId) return;
+  const id = npc.id;
+  if (G.flags['gift_' + id] === G.day) {
+    say([{ who: id, text: 'One gift a day keeps it a gift. (Come find me tomorrow.)' }]);
+    return;
+  }
+  takeItem(itemId, 1);
+  G.flags['gift_' + id] = G.day;
+  const p = SOCIAL.prefs[id] || { loved: [], liked: [], disliked: [] };
+  const B = LINES[id] || {};
+  const bday = isBirthday(id, G.day);
+  let delta, line, mood;
+  if (p.loved.includes(itemId)) { delta = 2; line = B.loved; mood = 'happy'; }
+  else if (p.disliked.includes(itemId)) { delta = -1; line = B.disliked; mood = 'sad'; }
+  else { delta = 1; line = B.liked; mood = 'happy'; }
+  if (bday) { delta = Math.max(delta * 2, delta + 3) * (delta > 0 ? 1 : 1); line = (delta > 0 && B.birthday) || line; mood = delta > 0 ? 'surprised' : mood; }
+  STORY.heart(id, delta);
+  // learned loves fill the Villagers wall by discovery
+  if (delta >= 2) {
+    const learned = G.flags['learned_' + id] = G.flags['learned_' + id] || [];
+    if (!learned.includes(itemId)) learned.push(itemId);
+  }
+  const itemName = ITEMS[itemId].name.toLowerCase();
+  say([{ who: id, text: line || 'Oh — thank you.', mood }], () => {
+    if (delta > 0) sfx('chime');
+    jline((bday ? 'Birthday gift for ' : 'Gave ') + CAST[id].name + (bday ? '' : ' a gift') + ' — ' + itemName + '. ' +
+      (delta >= 2 ? 'They lit up.' : delta > 0 ? 'Well received.' : 'A miss. Noted for next time.'));
+  });
+  G.dayFlags['gifted_' + id] = true;
+}
+
+/* ---- invoiced odd jobs (villager requests via mail) ---- */
+function maybeGenerateJob(day) {
+  if (day < 10) return;                               // requests begin once the valley knows you
+  G.jobs = G.jobs || [];
+  const cal = calendarDay(day ^ 0x0B5).r;
+  if (cal() > 0.5) return;
+  const busy = new Set(G.jobs.filter(j => j.status !== 'paid').map(j => j.villager));
+  const candidates = Object.keys(SOCIAL.prefs).filter(id => (G.hearts[id] || 0) >= 1 && !busy.has(id));
+  if (!candidates.length) return;
+  const vid = candidates[Math.floor(cal() * candidates.length)];
+  const wants = [...SOCIAL.prefs[vid].loved, ...SOCIAL.prefs[vid].liked]
+    .filter(it => ITEMS[it] && ITEMS[it].sell);
+  if (!wants.length) return;
+  const item = wants[Math.floor(cal() * wants.length)];
+  const qty = 2 + Math.floor(cal() * 3);
+  const reward = Math.round(ITEMS[item].sell * qty * 1.6);
+  G.jobs.push({ villager: vid, item, qty, reward, status: 'open', day });
+  G.mail.push({ day, from: CAST[vid].name, title: 'A small job, if you’re willing',
+    body: 'Could you bring me ' + qty + '× ' + ITEMS[item].name + '? I’ll pay $' + reward +
+      ' — invoiced proper, now that some of us do that. No rush past the season. — ' + CAST[vid].name, read: false });
+}
+function jobFor(id) {
+  return (G.jobs || []).find(j => j.villager === id && j.status === 'open');
+}
+function deliverJob(npc) {
+  const job = jobFor(npc.id);
+  if (!job) return false;
+  if ((G.inventory[job.item] || 0) < job.qty) return false;
+  showChoice(['Deliver ' + job.qty + '× ' + ITEMS[job.item].name, 'Not yet'], i => {
+    if (i !== 0) return;
+    takeItem(job.item, job.qty);
+    job.status = 'invoiced';
+    const connected = npc.id === 'bramm' && G.network.connected.general;
+    if (connected) {
+      job.status = 'paid';
+      G.money += job.reward;
+      G.ledger.entries.push({ day: G.day, amount: job.reward, enterprise: 'Odd Jobs', note: CAST[npc.id].name });
+      sfx('chime');
+      say([{ who: npc.id, text: 'Invoice, tap, settled. There it is in your account before you reach the door. Hm. Still feels like a magic trick.', mood: 'happy' }]);
+    } else {
+      job.payDay = G.day + CONFIG.CHECK_LAG_DAYS;
+      say([{ who: npc.id, text: 'Perfect. I’ll send payment along — check’s in the mail, the usual two days. You know how it goes around here.', mood: 'happy' }]);
+    }
+    STORY.heart(npc.id, 1);
+    jline('Finished ' + CAST[npc.id].name + '’s order — ' + job.qty + '× ' + ITEMS[job.item].name + ' for $' + job.reward + (connected ? ', settled on the spot.' : ', payment by mail. Naturally.'));
+    updateHUD();
+  });
+  return true;
+}
+function processJobInvoices(newDay) {
+  for (const j of (G.jobs || [])) {
+    if (j.status === 'invoiced' && j.payDay <= newDay) {
+      j.status = 'paid';
+      G.money += j.reward;
+      G.ledger.entries.push({ day: newDay, amount: j.reward, enterprise: 'Odd Jobs', note: CAST[j.villager].name + ' (check)' });
+      G.mail.push({ day: newDay, from: 'Valley Post', title: 'Payment from ' + CAST[j.villager].name,
+        body: 'Enclosed: $' + j.reward + ' for goods delivered. Two days, door to door. — VP', read: false });
+    }
+  }
+}
+
+/* ---- talk dispatcher (replaces the phase-1 placeholder talk) ---- */
+function socialTalk(npc) {
+  STORY.meet(npc.id);
+  const p = player();
+  npc.face = Math.atan2(p.x - npc.x, p.z - npc.z);
+  if (!npc.sprite) npc.group.rotation.y = npc.face;
+  if (deliverJob(npc)) return;
+  const gift = giftableHeld();
+  if (gift && G.flags['gift_' + npc.id] !== G.day) {
+    showChoice(['Give ' + ITEMS[gift].name, 'Just talk'], i => {
+      if (i === 0) giveGift(npc);
+      else say([{ who: npc.id, text: pickTalkLine(npc.id) }]);
+    });
+    return;
+  }
+  const bday = isBirthday(npc.id, G.day);
+  const lines = [{ who: npc.id, text: pickTalkLine(npc.id) }];
+  if (bday) lines.unshift('A little bunting on the door, a certain lightness: it’s ' + CAST[npc.id].name + '’s birthday today.');
+  say(lines);
 }
 /* ================================= UI ==================================== */
 // DOM builders — all dynamic text goes through textContent (no innerHTML).
@@ -2000,7 +2785,10 @@ function nextDialogue() {
   const rec = line.who && CAST[line.who];
   $('dlgName').textContent = rec ? rec.name : (line.who === 'player' ? G.playerName : '');
   $('dlgPortrait').style.display = rec ? 'block' : 'none';
-  if (rec) drawPortrait(rec);
+  if (rec) {
+    if (typeof drawPortraitTo === 'function') drawPortraitTo($('dlgPortrait').getContext('2d'), line.who, line.mood || 'neutral', 84);
+    else drawPortrait(rec);
+  }
   DLG.txt = line.text; DLG.shown = 0; DLG.revealing = true;
   $('dlg').style.display = 'block';
   $('dlgText').textContent = '';
@@ -2154,43 +2942,86 @@ function renderInventoryTab(body) {
   body.appendChild(grid);
 }
 function renderVillagersTab(body) {
-  const met = Object.keys(G.hearts);
+  const met = Object.keys(CAST).filter(id => id in G.hearts);
   if (!met.length) { body.appendChild(el('i', null, 'You haven’t really met anyone yet.')); return; }
+  const SEASON_OF_BDAY = d => CONFIG.SEASONS[Math.floor(d / 3) % 4] + ' ' + (d % 3 + 1);
+  const wall = el('div');
+  wall.style.cssText = 'display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px';
   for (const id of met) {
     const rec = CAST[id];
-    if (!rec) continue;
-    const d = el('div');
-    d.appendChild(el('b', null, rec.name + '  '));
+    const card = el('div');
+    card.style.cssText = 'display:flex;gap:8px;background:#EADCBC;border:2px solid var(--border);border-radius:10px;padding:6px';
+    const pc = document.createElement('canvas');
+    pc.width = 56; pc.height = 56;
+    pc.style.cssText = 'width:56px;height:56px;border-radius:8px;border:2px solid var(--border);flex-shrink:0';
+    if (typeof drawPortraitTo === 'function') drawPortraitTo(pc.getContext('2d'), id, 'neutral', 56);
+    card.appendChild(pc);
+    const info = el('div');
+    info.style.fontSize = '12px';
+    const nm = el('div');
+    nm.appendChild(el('b', null, rec.name));
+    info.appendChild(nm);
     const hearts = G.hearts[id] || 0;
-    d.appendChild(document.createTextNode('♥'.repeat(hearts)));
+    const hp = el('div', null, '♥'.repeat(hearts));
+    hp.style.cssText = 'color:#B3574C;letter-spacing:1px';
     const dim = el('span', null, '♥'.repeat(Math.max(0, 10 - hearts)));
-    dim.style.opacity = '0.25';
-    d.appendChild(dim);
-    d.style.marginBottom = '4px';
-    body.appendChild(d);
+    dim.style.cssText = 'opacity:.22';
+    hp.appendChild(dim);
+    info.appendChild(hp);
+    if (SOCIAL.birthdays[id] !== undefined) {
+      info.appendChild(el('div', null, 'Birthday: ' + SEASON_OF_BDAY(SOCIAL.birthdays[id])));
+    }
+    const learned = G.flags['learned_' + id] || [];
+    info.appendChild(el('div', null, 'Loves: ' + (learned.length ? learned.map(i => ITEMS[i].name).join(', ') : '?')));
+    card.appendChild(info);
+    wall.appendChild(card);
   }
+  body.appendChild(wall);
 }
 function renderLedgerTab(body) {
   if (!G.ledger.unlocked) { body.appendChild(el('i', null, 'A place for a book you don’t have yet.')); return; }
   const head = el('div', null, 'THE LEDGER — every dollar, tagged');
   head.style.color = 'var(--green)'; head.style.fontWeight = 'bold'; head.style.marginBottom = '8px';
   body.appendChild(head);
-  const by = {};
-  for (const e of G.ledger.entries) by[e.enterprise] = (by[e.enterprise] || 0) + e.amount;
-  const keys = Object.keys(by).sort((a, b) => by[b] - by[a]);
-  if (!keys.length) { body.appendChild(el('i', null, 'Nothing tagged yet. Ship something.')); return; }
-  const table = el('table');
-  table.style.width = '100%';
-  for (const k of keys) {
-    const tr = el('tr');
-    tr.appendChild(el('td', null, k));
-    const td = el('td', null, (by[k] >= 0 ? '+$' + by[k] : '−$' + (-by[k])));
-    td.style.textAlign = 'right'; td.style.fontWeight = 'bold';
-    td.style.color = by[k] >= 0 ? 'var(--green)' : '#a55';
-    tr.appendChild(td);
-    table.appendChild(tr);
+  const addTable = (title, entries) => {
+    const by = {};
+    for (const e of entries) by[e.enterprise] = (by[e.enterprise] || 0) + e.amount;
+    const keys = Object.keys(by).sort((a, b) => by[b] - by[a]);
+    body.appendChild(el('b', null, title));
+    if (!keys.length) { body.appendChild(el('div', null, '— nothing tagged —')); return; }
+    const table = el('table');
+    table.style.cssText = 'width:100%;margin-bottom:8px';
+    for (const k of keys) {
+      const tr = el('tr');
+      tr.appendChild(el('td', null, k));
+      const td = el('td', null, (by[k] >= 0 ? '+$' + by[k] : '−$' + (-by[k])));
+      td.style.cssText = 'text-align:right;font-weight:bold;color:' + (by[k] >= 0 ? 'var(--green)' : '#a55');
+      tr.appendChild(td);
+      table.appendChild(tr);
+    }
+    body.appendChild(table);
+  };
+  // this season's one-page report
+  const s0 = Math.floor(G.day / 3) * 3;
+  const seasonEntries = G.ledger.entries.filter(e => e.day >= s0 && e.day < s0 + 3);
+  addTable('This season — ' + seasonOf(G.day) + ', Year ' + yearOf(G.day), seasonEntries);
+  // best day & biggest cost
+  const byDay = {};
+  let biggestCost = null;
+  for (const e of G.ledger.entries) {
+    if (e.amount > 0) byDay[e.day] = (byDay[e.day] || 0) + e.amount;
+    if (e.amount < 0 && (!biggestCost || e.amount < biggestCost.amount)) biggestCost = e;
   }
-  body.appendChild(table);
+  const bestDay = Object.keys(byDay).sort((a, b) => byDay[b] - byDay[a])[0];
+  if (bestDay !== undefined) body.appendChild(el('div', null, 'Best day: ' + dayName(+bestDay) + ' (+$' + byDay[bestDay] + ')'));
+  if (biggestCost) body.appendChild(el('div', null, 'Biggest cost: ' + (biggestCost.note || biggestCost.enterprise) + ' (−$' + (-biggestCost.amount) + ')'));
+  body.appendChild(el('br'));
+  addTable('All time', G.ledger.entries);
+  // outstanding
+  const pend = G.pendingChecks.reduce((s, c) => s + c.amount, 0);
+  const inv = (G.jobs || []).filter(j => j.status === 'invoiced').reduce((s, j) => s + j.reward, 0);
+  if (pend) body.appendChild(el('div', null, 'Checks in the mail: $' + pend));
+  if (inv) body.appendChild(el('div', null, 'Invoices outstanding: $' + inv));
 }
 function renderJournalTab(body) {
   if (!G.journal.length) { body.appendChild(el('i', null, 'The first page is always the hardest.')); return; }
@@ -2360,7 +3191,8 @@ function renderShop() {
       nm.appendChild(d);
     }
     row.appendChild(nm);
-    row.appendChild(el('div', 'shopPrice' + (G.money >= it.price ? '' : ' cant'), '$' + it.price));
+    row.appendChild(el('div', 'shopPrice' + (G.money >= it.price ? '' : ' cant'),
+      it.priceLabel || ('$' + it.price)));
     row.onclick = () => { SHOP.sel = i; buyShopItem(); };
     box.appendChild(row);
   });
@@ -2372,6 +3204,21 @@ function renderShop() {
 function buyShopItem() {
   const it = SHOP.items[SHOP.sel];
   if (!it) return;
+  if (it.sellAll) {
+    const { id, n } = it.sellAll;
+    const have = G.inventory[id] || 0;
+    if (!have) { renderShop(); return; }
+    const value = ITEMS[id].sell * have;
+    takeItem(id, have);
+    G.money += value;
+    G.ledger.entries.push({ day: G.day, amount: value, enterprise: ITEMS[id].enterprise, note: 'Sold over the counter' });
+    sfx('coin');
+    toast('Sold ' + have + '× ' + ITEMS[id].name + ' for $' + value + '.');
+    SHOP.items.splice(SHOP.sel, 1);
+    SHOP.sel = Math.max(0, SHOP.sel - 1);
+    updateHUD(); renderShop();
+    return;
+  }
   if (G.money < it.price) {
     sfx('thud');
     if (STORY.onCantAfford) STORY.onCantAfford(it);
@@ -2670,6 +3517,8 @@ const STORY = {
     const next = () => {
       if (i >= steps.length) {
         if (G.mode === 'scene') G.mode = 'play';   // a step may have started sleep
+        // scenes moved people; make the schedule re-target so they walk back
+        for (const id in ACTORS) if (id !== 'player') delete ACTORS[id].schedKey;
         done && done();
         return;
       }
@@ -2687,7 +3536,7 @@ const STORY = {
       }
       else if (s.face) {
         const a = ACTORS[s.face.id];
-        if (a) { a.face = s.face.angle; a.group.rotation.y = s.face.angle; }
+        if (a) { a.face = s.face.angle; if (!a.sprite) a.group.rotation.y = s.face.angle; }
         next();
       }
       else if (s.fade) { fadeOut(() => { s.fade(); fadeIn(next); }); }
@@ -2699,45 +3548,19 @@ const STORY = {
   },
 
   spawnVillager(id, x, z) {
-    removeActor(id);
-    return makeActor(id, CAST[id], x, z);
-  },
-  clearVillagers() {
-    for (const id in ACTORS) if (id !== 'player') removeActor(id);
+    let a = ACTORS[id];
+    if (!a) a = makeActor(id, CAST[id], x, z);
+    else actorSetPos(a, x, z);
+    a.visible = true; a.group.visible = true;
+    a.waypoints = [];
+    return a;
   },
 
-  /* ---- per-day cast placement (scripted for year 1; schedules in ph.2) ---- */
+  /* ---- cast placement: schedule skeletons drive everyone (phase 2) ---- */
   placeCast(day) {
-    STORY.clearVillagers();
-    const W = G.world;
-    const shopPos = id => {
-      const s = W.shops.find(s => s.id === id);
-      return s ? { x: s.x + 1.5, z: s.z + s.d / 2 + 1.4 } : { x: W.gazebo.x, z: W.gazebo.z };
-    };
-    const rest = isRestday(day);
-    if (day === 7) return;                       // fair day: cast placed by the scene
-    if (!rest) {
-      const g = shopPos('general'); STORY.spawnVillager('bramm', g.x, g.z);
-      const t = shopPos('tavern'); STORY.spawnVillager('maren', t.x, t.z);
-      const f = shopPos('forge'); STORY.spawnVillager('hetta', f.x, f.z);
-      const cp = shopPos('carpenter'); STORY.spawnVillager('corwin', cp.x, cp.z);
-      const cl = shopPos('clinic'); STORY.spawnVillager('isolde', cl.x, cl.z);
-      STORY.spawnVillager('greta', W.ranchGate.x - 2, W.ranchGate.z + 1);
-      STORY.spawnVillager('pip', W.gazebo.x + 4, W.gazebo.z + 5);
-      STORY.spawnVillager('aldwin', W.gazebo.x - 5, W.gazebo.z + 5.5);
-      STORY.spawnVillager('rolf', W.town.x + 26, W.pathZ + 6);
-      STORY.spawnVillager('ness', W.dock.x, W.dock.z - 1.2);
-      STORY.spawnVillager('fen', W.marker.x + 2, W.marker.z + 6);
-      STORY.spawnVillager('sable', W.trailX - 14, -20);
-    } else {
-      // Restday: shops shut. Bramm's in the back room (unseen). Sable: the bench.
-      STORY.spawnVillager('sable', W.bench.x, W.bench.z + 1.2);
-      STORY.spawnVillager('ness', W.dock.x, W.dock.z - 1.2);
-      STORY.spawnVillager('pip', W.gazebo.x + 3, W.gazebo.z + 5);
-      STORY.spawnVillager('fen', W.marker.x + 2, W.marker.z + 6);
-      STORY.spawnVillager('maren', shopPos('tavern').x, shopPos('tavern').z);
-    }
-    if (day === 9 && !G.flags.aldwinDone) removeActor('aldwin');   // he's coming to you
+    buildCast();
+    assembleSchedules(day);
+    snapSchedules();
   },
 
   /* ================= day starts ================= */
@@ -2765,8 +3588,11 @@ const STORY = {
         jline('Winter 1. The cold doesn’t knock first.');
         break;
       case 10:
-        G.mail.push({ day: 10, from: 'Aldwin', title: 'That thing I mentioned',
-          body: 'The ledger book, like I promised. Funny thing — I mailed it two days ago, same day I saw you. It took the mail two days to cross one valley. That’s rather the point. — A.', read: false });
+        if (!G.flags.ledgerMailed) {
+          G.flags.ledgerMailed = true;
+          G.mail.push({ day: 10, from: 'Aldwin', title: 'That thing I mentioned',
+            body: 'The ledger book, like I promised. Funny thing — I mailed it two days ago, same day I saw you. It took the mail two days to cross one valley. That’s rather the point. — A.', read: false });
+        }
         setObjective('Something’s in the mailbox');
         if (!fromLoad) say(['The mailbox flag is up.']);
         break;
@@ -2891,7 +3717,7 @@ const STORY = {
         updateHUD();
       } },
       { walk: { id: 'maren', x: W.bridge.x + 8, z: W.pathZ } },
-      { fn: () => { removeActor('maren'); } }
+      { fn: () => { delete ACTORS.maren.schedKey; } }   // she walks back to the Bluebird
     ]);
   },
 
@@ -2901,8 +3727,8 @@ const STORY = {
     STORY.scene([
       { fade: () => {
         actorSetPos(player(), gx, gz + 9);
-        player().face = 0; player().group.rotation.y = 0;
-        STORY.clearVillagers();
+        player().face = 0;
+        if (!player().sprite) player().group.rotation.y = 0;
         const spots = [
           ['bramm', -6, 4], ['hetta', -4, 3.4], ['corwin', -2, 4.2], ['isolde', 0, 3.6],
           ['rolf', 2, 4.2], ['maren', 4, 3.4], ['greta', 6, 4], ['aldwin', -3, 6],
@@ -2957,7 +3783,7 @@ const STORY = {
         STORY.heart('aldwin', 1);
       } },
       { walk: { id: 'aldwin', x: W.bridge.x + 8, z: W.pathZ } },
-      { fn: () => removeActor('aldwin') }
+      { fn: () => { delete ACTORS.aldwin.schedKey; } }
     ]);
   },
 
@@ -3015,10 +3841,12 @@ const STORY = {
     G.flags.brammShoreStarted = true;
     const b = STORY.spawnVillager('bramm', W.town.x - 38, W.pathZ);
     b.speed = 2.6;
+    b.scriptLock = true;
     b.waypoints = [
       { x: W.bridge.x + 6, z: W.pathZ },
       { x: W.pool.x + 4, z: W.pool.z - 10 },
       { x: W.bench.x + 1.8, z: W.bench.z + 0.8, onArrive: () => {
+        b.scriptLock = false;
         const p = player();
         if (dist2(p.x, p.z, W.bench.x, W.bench.z) < 250) {
           G.flags.shoreWitnessed = true;
@@ -3051,9 +3879,10 @@ const STORY = {
     STORY.scene([
       { fade: () => {
         G.weather = 'snow';
+        if (ACTORS.bramm) ACTORS.bramm.scriptLock = false;
         actorSetPos(player(), gx, gz + 9);
-        player().face = 0; player().group.rotation.y = 0;
-        STORY.clearVillagers();
+        player().face = 0;
+        if (!player().sprite) player().group.rotation.y = 0;
         const spots = [
           ['bramm', -5, 4], ['hetta', -3, 3.4], ['corwin', -1, 4.2], ['isolde', 1, 3.6],
           ['rolf', 3, 4.2], ['maren', 5, 3.4], ['greta', -6, 6], ['aldwin', -2, 6.2],
@@ -3155,10 +3984,44 @@ const STORY = {
     if (rest) { say(['Shut for the Restday. The whole street is.']); return; }
     if (!open && door.id !== 'tavern') { say(['Closed for the day.']); return; }
     if (door.id === 'tavern') say([{ who: 'maren', text: 'Bluebird’s open! Well — the door is. The kitchen argues. What’s the news from the farm?' }]);
-    else if (door.id === 'forge') say([{ who: 'hetta', text: 'Forge is hot, tools are cold. Come spring I’ll upgrade that sad hoe of yours — copper, then we talk.' }]);
+    else if (door.id === 'forge') STORY.openForge();
     else if (door.id === 'carpenter') say([{ who: 'corwin', text: 'Corwin! Carpentry! You’ve got a fine porch and I’ve got ideas about it. Come back when you’ve got lumber money.' }]);
     else if (door.id === 'clinic') say([{ who: 'isolde', text: 'Oh — hello. You look… well, you look like farming. Rest when you’re tired. People forget that’s medical advice.' }]);
     else say(['The door is friendly but firm: this is somebody’s home.']);
+  },
+
+  openForge() {
+    const items = [];
+    G.toolTiers = G.toolTiers || {};
+    if (G.toolAway) {
+      say([{ who: 'hetta', text: 'Your ' + G.toolAway.tool + '’s still in the fire. One thing at a time — that’s how they come out right.' }]);
+      return;
+    }
+    const TOOL_NAMES = { hoe: 'Hoe', can: 'Watering Can', axe: 'Axe', hammer: 'Hammer', sickle: 'Sickle' };
+    for (const t of G.tools) {
+      if ((G.toolTiers[t] || 0) >= 1) continue;
+      items.push({ icon: '⚒', name: 'Copper ' + TOOL_NAMES[t], price: CONFIG.TOOL_PRICES.copper,
+        desc: CONFIG.TOOL_TURNAROUND + '-day turnaround — you lose the ' + t + '. Lighter swing after.',
+        onBuy: () => {
+          G.toolAway = { tool: t, backDay: G.day + CONFIG.TOOL_TURNAROUND };
+          closeShop();
+          say([{ who: 'hetta', text: 'Good. Leave it. ' + CONFIG.TOOL_TURNAROUND + ' days — and plan your watering around the loss, farmer. Rain is your friend now.' }]);
+          jline('Left the ' + t + ' at the forge. Two days of working around its absence. Hetta looked delighted. The ' + t + ' looked resigned.');
+        } });
+    }
+    if (!items.length) { say([{ who: 'hetta', text: 'Everything you own is already copper. Iron’s a conversation for after you’ve worn the copper in.' }]); return; }
+    openShop("Hetta's Forge & Supply", items, 'estimates chalked on the wall');
+  },
+
+  // last season's per-crop earnings, shown as profit chips once the Ledger exists
+  profitChip(cropName) {
+    if (!G.ledger.unlocked) return '';
+    const seasonStart = Math.floor(G.day / 3) * 3 - 3;
+    if (seasonStart < 0) return '';
+    const earned = G.ledger.entries
+      .filter(e => e.enterprise === cropName && e.amount > 0 && e.day >= seasonStart && e.day < seasonStart + 3)
+      .reduce((s, e) => s + e.amount, 0);
+    return earned > 0 ? ' · last season: +$' + earned : '';
   },
 
   openGeneral() {
@@ -3168,8 +4031,18 @@ const STORY = {
       const c = CONFIG.CROPS[id];
       if (c.seasons.includes(season)) {
         items.push({ icon: '🌱', name: c.name + ' Seeds ×' + c.packet, price: c.seed,
-          give: 'seed_' + id, count: c.packet, desc: c.days + ' days to harvest · sells $' + c.sell });
+          give: 'seed_' + id, count: c.packet,
+          desc: c.days + ' days to harvest · sells $' + c.sell + STORY.profitChip(c.name) });
       }
+    }
+    // sell from your pockets — same price as the bin, instant cash
+    for (const id of Object.keys(G.inventory)) {
+      const it = ITEMS[id];
+      if (!it || !it.sell) continue;
+      const n = G.inventory[id];
+      items.push({ icon: it.icon, name: 'Sell ' + it.name + ' ×' + n, price: 0,
+        priceLabel: '+$' + it.sell * n, sellAll: { id, n },
+        desc: 'over the counter, cash today' });
     }
     if (season === 'Winter' && !G.flags.coatBought) {
       items.push({ icon: '🧥', name: 'Winter Coat', price: CONFIG.COAT_PRICE,
@@ -3200,49 +4073,23 @@ const STORY = {
     openShop("Bramm's General", items, note);
   },
 
-  /* ================= talk ================= */
-  talkTo(npc) {
-    STORY.meet(npc.id);
-    const p = player();
-    npc.face = Math.atan2(p.x - npc.x, p.z - npc.z);
-    npc.group.rotation.y = npc.face;
-    const season = seasonOf(G.day), rest = isRestday(G.day);
-    const L = {
-      bramm: rest ? 'Store’s shut. I’m only out here because the books blur if I don’t blink some daylight between columns.'
-        : 'Need something? It’s on a shelf. Everything’s on a shelf. That’s retail.',
-      maren: 'The Bluebird’s always warmer than it looks. Come by after dark and prove me right.',
-      hetta: 'That hoe of yours is one season from retirement. When it goes, I’ll build you better.',
-      corwin: 'Good bones on your farmhouse. Great bones! Bones deserve floors, eventually. Call me.',
-      isolde: G.stamina <= 50 ? 'You’re carrying your shoulders like a full watering can. Sit down for a minute. Doctor’s orders — informally.'
-        : 'Nice to see you upright and rested. That’s most of health, honestly.',
-      rolf: 'Watering streak. Write it down. A pumpkin remembers every day you skipped — that’s the whole game, neighbor.',
-      greta: 'Hens in spring, if you’ve got the coop for it. Come see me when you do. Early — I’m up before the roosters, it embarrasses them.',
-      aldwin: G.flags.flyerTaken ? 'The flyer still in your pocket? Good. Paper remembers what people mean to get to.'
-        : 'A fine ' + season.toLowerCase() + ' morning to be retired in, and I intend to waste none of it usefully.',
-      ness: 'River’s honest. Cold, but honest. That’s more than you can say for most accounting.',
-      fen: 'The old marker up the trail — I keep it swept. Why? It likes being swept. Some questions end there.',
-      pip: 'The BEST berries are past the big rock, but the SECRET berries — okay I’ll tell you later. When it’s safer.',
-      sable: rest ? 'The bench and I have an arrangement. It holds still, and I stay long enough to notice something worth writing down.'
-        : 'Just walking. The valley reads differently every day — someone ought to keep up with the drafts.'
-    };
-    say([{ who: npc.id, text: L[npc.id] || '…' }], () => {
-      if (!G.flags['met_' + npc.id]) {
-        G.flags['met_' + npc.id] = true;
-        STORY.heart(npc.id, 0);   // registered on the wall
-      }
-    });
-  }
+  /* ================= talk (line banks + gifts, phase 2) ================= */
+  talkTo(npc) { socialTalk(npc); }
 };
 
 function startNewGame() {
   if (!G.world) G.world = generateWorld(TITLE.seed || 1234567);
   buildWorldScene();
   buildItems();
+  bakeAllSprites();
   const W = G.world;
   G.day = CONFIG.START_DAY;
   G.hour = 8;
   G.weather = weatherFor(G.day);
   spawnPlayer(W.gazebo.x - 1.5, W.gazebo.z + 6);
+  buildCast();
+  assembleSchedules(G.day);
+  snapSchedules();
   spawnForage();
   updateCamera(player().x, player().z, true);
   applyGrade();
@@ -3278,6 +4125,7 @@ function frame(tms) {
       tickActorAnim(p, dt, false);
     }
     if (RAD.open) { const iv = inputVector(); radialAim(iv.x, iv.z); }
+    if (!simPaused()) tickSchedules();
     for (const id in ACTORS) if (id !== 'player') tickNPC(ACTORS[id], dt);
     STORY.tick();
     updateTargetHighlight(t);
@@ -3338,6 +4186,7 @@ window.ALMANAC = {
       tickTime(dt);
       const p = player();
       if (p && G.mode === 'scene') tickNPC(p, dt);
+      if (!simPaused()) tickSchedules();
       for (const id in ACTORS) if (id !== 'player') tickNPC(ACTORS[id], dt);
       STORY.tick();
       if (autoAdvance && (DLG.active || CH.open)) this.skipDialogue();
