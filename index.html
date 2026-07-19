@@ -388,6 +388,9 @@ const G = {
   jobs: [],                // invoiced odd jobs
   toolTiers: {},           // tool -> tier (0 base, 1 copper, …)
   toolAway: null,          // {tool, backDay} while at the forge
+  contracts: {},           // castId -> standing order
+  backpack: 12,            // inventory kinds cap: 12 → 24 → 36
+  upgrades: {},            // kitchen, porch, …
   farmName: 'Sundrop Farm',
   playerName: 'You',
   look: { skin: 0, hair: 0, shirt: 0 },
@@ -995,20 +998,23 @@ function buildWorldScene() {
     b.position.set(s.x, 0, s.z); WG.add(b);
     addBlob(WG, s.x, s.z + 1, s.w * 1.5, 0.5);
     registerBox(s.x, s.z, s.w / 2 + 0.2, s.d / 2 + 0.2);
-    if (s.name) W.doors.push({ id: s.id, x: s.x, z: s.z + s.d / 2 + 0.6, name: s.name });
+    if (s.name) {
+      W.doors.push({ id: s.id, x: s.x, z: s.z + s.d / 2 + 0.6, name: s.name });
+      // ledger-green counter glyph, hidden until this business connects
+      const glyph = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.0),
+        new THREE.MeshBasicMaterial({ map: emojiTex('✳'), transparent: true, color: P.green }));
+      glyph.position.set(1.6, 2.9, s.d / 2 + 0.06);
+      glyph.visible = !!G.network.connected[s.id];
+      b.add(glyph);
+      R.glyphs[s.id] = glyph;
+    }
     if (s.id === 'general') {
       // back-room window (west side) — lit on Restdays before the network
       const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2),
         new THREE.MeshBasicMaterial({ map: TEX.windowDark }));
-      win.position.set(-s.w / 2 - 0.03, 1.7, s.z - s.z);   // local coords
+      win.position.set(-s.w / 2 - 0.03, 1.7, 0);
       win.rotation.y = -Math.PI / 2;
       b.add(win); R.backroomWindow = win;
-      // ledger-green counter glyph, hidden until connected
-      const glyph = new THREE.Mesh(new THREE.PlaneGeometry(1.0, 1.0),
-        new THREE.MeshBasicMaterial({ map: emojiTex('✳'), transparent: true, color: P.green }));
-      glyph.position.set(1.6, 2.9, s.d / 2 + 0.06);
-      glyph.visible = false; b.add(glyph);
-      R.glyphs.general = glyph;
     }
   }
 
@@ -1122,6 +1128,7 @@ function buildWorldScene() {
     new THREE.MeshBasicMaterial({ map: signTex("Greta's Ranch") }));
   rsign.position.set(0, 2.2, 0.2); rg.add(rsign);
   rg.position.set(W.ranchGate.x, 0, W.ranchGate.z - 2); WG.add(rg);
+  W.doors.push({ id: 'ranch', x: W.ranchGate.x, z: W.ranchGate.z - 0.5, name: "Greta's Ranch" });
 
   // water tower silhouette (register: rural Americana)
   const wt = new THREE.Group();
@@ -1212,6 +1219,7 @@ function buildTileLayers(parent) {
   mk('stump', new THREE.CylinderGeometry(0.34, 0.42, 0.5, 8), MAT.trunk);
   mk('boulder', new THREE.DodecahedronGeometry(0.62, 0), MAT.stone);
   mk('log', new THREE.CylinderGeometry(0.3, 0.3, 1.4, 8), MAT.trunk);
+  mk('sprinkler', new THREE.CylinderGeometry(0.1, 0.16, 0.5, 6), lambert('#8C9499'));
   mk('dead', new THREE.ConeGeometry(0.16, 0.4, 5), lambert('#8C8474'));
   const sproutMat = lambert('#5E8A55');
   mk('crop0', new THREE.SphereGeometry(0.08, 6, 5), sproutMat);
@@ -1902,6 +1910,11 @@ function buildItems() {
   ITEMS.coat = { name: 'Winter Coat', icon: '🧥', sell: 0, enterprise: 'Supplies' };
 }
 function addItem(id, n) {
+  if (!(id in G.inventory) && typeof backpackCap === 'function' &&
+      Object.keys(G.inventory).length >= backpackCap()) {
+    toast('Backpack’s full — ' + backpackCap() + ' kinds is the limit. Bramm sells bigger.');
+    return;
+  }
   G.inventory[id] = (G.inventory[id] || 0) + (n || 1);
   if (!G.heldItem && ITEMS[id]) G.heldItem = id;
   updateHUD();
@@ -2017,21 +2030,34 @@ function rollover(newDay) {
       body: 'Your ' + c.label.toLowerCase() + ' for $' + c.amount + ' has cleared. Thank you for your patience.', read: false });
     G.flags.lastCheckAmount = c.amount;
   }
-  // 3. crop growth
+  // 3. crop growth (watering streak feeds the fair pumpkin's size roll)
   for (const t of G.world.tiles) {
     if (!t.crop || t.dead) continue;
     const c = CONFIG.CROPS[t.crop];
-    if (t.watered) { t.grown = Math.min(c.days, t.grown + 1); t.dry = 0; }
-    else if (t.grown < c.days) {
-      t.dry++;
-      if (t.dry >= 2) { t.dead = true; G.dayFlags.cropDied = true; }
+    if (t.watered) { t.grown = Math.min(c.days, t.grown + 1); t.dry = 0; t.streak = (t.streak || 0) + 1; }
+    else {
+      t.streak = 0;
+      if (t.grown < c.days) {
+        t.dry++;
+        if (t.dry >= 2) { t.dead = true; G.dayFlags.cropDied = true; }
+      }
     }
   }
-  // 4. watered flags clear (unless rain)
+  // 4. watered flags clear (unless rain); sprinklers water their neighbours
   const newWeather = weatherFor(newDay);
   for (const t of G.world.tiles) {
     t.watered = newWeather === 'rain';
   }
+  const f0 = G.world.field;
+  G.world.tiles.forEach((t, i) => {
+    if (t.obj !== 'sprinkler') return;
+    const tx = i % f0.w, tz = Math.floor(i / f0.w);
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const nx = tx + dx, nz = tz + dz;
+      if (nx < 0 || nx >= f0.w || nz < 0 || nz >= f0.h) continue;
+      G.world.tiles[nz * f0.w + nx].watered = true;
+    }
+  });
   // 5. weather
   G.weather = newWeather;
   // 6-7. forage respawn (below) + villager schedules
@@ -2050,7 +2076,8 @@ function rollover(newDay) {
     jline('Hetta returned the ' + G.toolAway.tool + ' — copper now, lighter than it has any right to be.');
     G.toolAway = null;
   }
-  // 9. contract fulfillment — phase 3
+  // 9. contract fulfillment (Restdays)
+  if (typeof fulfillContracts === 'function') fulfillContracts(newDay);
   const seasonChanged = seasonOf(newDay) !== seasonOf(prevDay);
   G.day = newDay;
   G.hour = CONFIG.DAY_START;
@@ -2101,6 +2128,11 @@ function doSleep(forced) {
 
 /* ---- tile & world actions (the smart button) ---- */
 function performAction() {
+  // rod held + facing water → cast (fishing owns E until resolved)
+  if (G.heldItem === 'rod') {
+    const p0 = player(), fv0 = facingVector();
+    if (isWaterAt(p0.x + fv0.x * 1.6, p0.z + fv0.z * 1.6)) { tryCast(); return; }
+  }
   const act = findAction();
   if (!act) return;
   const p = player();
@@ -2146,12 +2178,27 @@ function doTileAction(tt) {
   else if (t.obj === 'boulder' || t.obj === 'log') { toast('Too big for your tools — Hetta could help, come spring.'); return; }
   else if (t.crop && t.dead) { t.crop = null; t.grown = 0; t.dead = false; hop(); sfx('thud'); toast('Cleared the withered plant.'); }
   else if (t.crop && cropVisualStage(t) === 3) {
-    addItem(t.crop, 1); t.crop = null; t.grown = 0;
+    const c = CONFIG.CROPS[t.crop];
+    addItem(t.crop, 1);
+    if (c.seedsBack) addItem('seed_' + t.crop, 1);      // the sunflower gimmick
+    if (c.fair) {                                        // pumpkin size, streak-weighted
+      const size = Math.min(99, 28 + (t.streak || 0) * 14 + Math.floor(calendarDay(G.day * 31 + tt.idx).r() * 14));
+      if (size > (G.flags.bestPumpkin || 0)) G.flags.bestPumpkin = size;
+      toast('A ' + size + '-point pumpkin!');
+    }
+    if (c.regrow) { t.grown = Math.max(0, c.days - c.regrow); }
+    else { t.crop = null; t.grown = 0; t.streak = 0; }
     hop(); sfx('pick');
     G.dayFlags.harvested = (G.dayFlags.harvested || 0) + 1;
     if (!G.flags.firstHarvest) { G.flags.firstHarvest = true; jline('First harvest. They’re small and a little lopsided and I grew them.'); }
   }
   else if (t.crop) { if (toolIsAway('can')) return; t.watered = true; spendStamina(toolCost('can')); hop(); sfx('plink'); }
+  else if (t.s === 'till' && held === 'sprinkler' && !t.crop) {
+    if (!takeItem('sprinkler', 1)) return;
+    t.obj = 'sprinkler';
+    hop(); sfx('thud');
+    toast('Sprinkler set — it waters its four neighbours each morning.');
+  }
   else if (t.s === 'till' && heldSeed) {
     const crop = CONFIG.CROPS[heldSeed];
     if (!crop.seasons.includes(seasonOf(G.day))) { toast('Not the season for ' + crop.name.toLowerCase() + '.'); return; }
@@ -2206,7 +2253,8 @@ function saveEncode() {
     flags: G.flags, ledger: G.ledger, network: G.network,
     farmName: G.farmName, playerName: G.playerName, look: G.look,
     hearts: G.hearts, jobs: G.jobs || [], toolTiers: G.toolTiers || {},
-    toolAway: G.toolAway || null, tiles
+    toolAway: G.toolAway || null, contracts: G.contracts || {},
+    backpack: G.backpack || 12, upgrades: G.upgrades || {}, tiles
   };
   return b64encode(JSON.stringify(data));
 }
@@ -2234,6 +2282,7 @@ function applySave(data) {
   G.farmName = data.farmName; G.playerName = data.playerName; G.look = data.look || G.look;
   G.hearts = data.hearts || {};
   G.jobs = data.jobs || []; G.toolTiers = data.toolTiers || {}; G.toolAway = data.toolAway || null;
+  G.contracts = data.contracts || {}; G.backpack = data.backpack || 12; G.upgrades = data.upgrades || {};
   G.weather = weatherFor(G.day);
   location.hash = '#s=' + data.seed;
   buildWorldScene();
@@ -2690,7 +2739,11 @@ function socialTalk(npc) {
   const p = player();
   npc.face = Math.atan2(p.x - npc.x, p.z - npc.z);
   if (!npc.sprite) npc.group.rotation.y = npc.face;
+  if (typeof resumeContract === 'function' && resumeContract(npc)) return;
   if (deliverJob(npc)) return;
+  if (typeof proposeContract === 'function' && proposeContract(npc)) return;
+  if (typeof tryVignette === 'function' && tryVignette(npc.id)) return;
+  if (typeof maybeTeachRecipe === 'function' && maybeTeachRecipe(npc.id)) return;
   const gift = giftableHeld();
   if (gift && G.flags['gift_' + npc.id] !== G.day) {
     showChoice(['Give ' + ITEMS[gift].name, 'Just talk'], i => {
@@ -2703,6 +2756,746 @@ function socialTalk(npc) {
   const lines = [{ who: npc.id, text: pickTalkLine(npc.id) }];
   if (bday) lines.unshift('A little bunting on the door, a certain lightness: it’s ' + CAST[npc.id].name + '’s birthday today.');
   say(lines);
+}
+/* ==================== CONTENT: the full tables (phase 3) ================= */
+// ~18 crops across three growing seasons (winter cropless by design, §7).
+// Regrow crops produce every `regrow` days after maturity.
+Object.assign(CONFIG.CROPS, {
+  // spring
+  peas:      { name: 'Peas',      icon: '🫛', seasons: ['Spring'], days: 3, seed: 26, sell: 9,  color: 0x7FA85A, packet: 6, regrow: 2 },
+  cabbage:   { name: 'Cabbage',   icon: '🥬', seasons: ['Spring'], days: 3, seed: 32, sell: 16, color: 0x8FBF7A, packet: 6 },
+  // summer
+  tomato:    { name: 'Tomato',    icon: '🍅', seasons: ['Summer'], days: 3, seed: 28, sell: 9,  color: 0xC65B4B, packet: 6, regrow: 1 },
+  corn:      { name: 'Corn',      icon: '🌽', seasons: ['Summer'], days: 3, seed: 30, sell: 11, color: 0xE0C070, packet: 6, regrow: 2 },
+  melon:     { name: 'Melon',     icon: '🍈', seasons: ['Summer'], days: 3, seed: 34, sell: 19, color: 0xA8C88A, packet: 6 },
+  sunflower: { name: 'Sunflower', icon: '🌻', seasons: ['Summer'], days: 2, seed: 24, sell: 10, color: 0xE8B84C, packet: 6, seedsBack: true },
+  pepper:    { name: 'Pepper',    icon: '🫑', seasons: ['Summer'], days: 2, seed: 26, sell: 8,  color: 0xB3574C, packet: 6, regrow: 2 },
+  blueberry: { name: 'Blueberry', icon: '🫐', seasons: ['Summer'], days: 3, seed: 32, sell: 12, color: 0x6A6AA0, packet: 6, regrow: 2 },
+  // autumn
+  pumpkin:   { name: 'Pumpkin',   icon: '🎃', seasons: ['Autumn'], days: 3, seed: 36, sell: 22, color: 0xD08A3C, packet: 4, fair: true },
+  yam:       { name: 'Yam',       icon: '🍠', seasons: ['Autumn'], days: 2, seed: 26, sell: 9,  color: 0xB07E52, packet: 6, regrow: 2 },
+  eggplant:  { name: 'Eggplant',  icon: '🍆', seasons: ['Autumn'], days: 3, seed: 28, sell: 10, color: 0x6A4A7A, packet: 6, regrow: 2 },
+  cranberry: { name: 'Cranberry', icon: '🍒', seasons: ['Autumn'], days: 3, seed: 34, sell: 13, color: 0xA34A4A, packet: 6, regrow: 2 }
+});
+// summer forage joins the table
+CONFIG.FORAGE.Summer = [
+  { id: 'honeycomb', name: 'Honeycomb', icon: '🍯', sell: 12 },
+  { id: 'fern', name: 'Fiddlehead', icon: '🌿', sell: 8 },
+  { id: 'shell', name: 'River Shell', icon: '🐚', sell: 6 }
+];
+
+/* ---- fish: ~14 by zone × season, a few rain-only (§7) ---- */
+// zone: river | pool | ocean. rarity drives the hit-zone width.
+const FISH = [
+  { id: 'chub',      name: 'Creek Chub',    icon: '🐟', sell: 9,  zones: ['river'], seasons: null, rarity: 0 },
+  { id: 'perch',     name: 'Amber Perch',   icon: '🐟', sell: 12, zones: ['river', 'pool'], seasons: ['Autumn', 'Winter'], rarity: 0 },
+  { id: 'trout',     name: 'Valley Trout',  icon: '🐟', sell: 15, zones: ['river'], seasons: ['Spring', 'Autumn'], rarity: 1 },
+  { id: 'bream',     name: 'Bridge Bream',  icon: '🐟', sell: 11, zones: ['pool'], seasons: null, rarity: 0 },
+  { id: 'catfish',   name: 'Mud Catfish',   icon: '🐟', sell: 22, zones: ['river', 'pool'], seasons: null, rarity: 2, rainOnly: true },
+  { id: 'pike',      name: 'Reed Pike',     icon: '🐟', sell: 19, zones: ['pool'], seasons: ['Summer'], rarity: 2 },
+  { id: 'smelt',     name: 'Ice Smelt',     icon: '🐟', sell: 13, zones: ['river', 'pool'], seasons: ['Winter'], rarity: 1 },
+  { id: 'carp',      name: 'Old Carp',      icon: '🐟', sell: 7,  zones: ['pool'], seasons: null, rarity: 0 },
+  { id: 'salmon',    name: 'Run Salmon',    icon: '🐟', sell: 26, zones: ['river'], seasons: ['Autumn'], rarity: 2 },
+  { id: 'sardine',   name: 'Sardine',       icon: '🐟', sell: 8,  zones: ['ocean'], seasons: null, rarity: 0 },
+  { id: 'flounder',  name: 'Flounder',      icon: '🐟', sell: 14, zones: ['ocean'], seasons: null, rarity: 1 },
+  { id: 'seabass',   name: 'Sea Bass',      icon: '🐟', sell: 21, zones: ['ocean'], seasons: ['Summer', 'Autumn'], rarity: 2 },
+  { id: 'stormcod',  name: 'Storm Cod',     icon: '🐟', sell: 28, zones: ['ocean'], seasons: null, rarity: 2, rainOnly: true },
+  { id: 'moonfish',  name: 'Moonfish',      icon: '🐟', sell: 40, zones: ['pool', 'ocean'], seasons: null, rarity: 3, nightOnly: true }
+];
+function fishTableHere(x, z) {
+  const W = G.world;
+  let zone = 'river';
+  if (W.coastal && z > W.oceanZ - 3) zone = 'ocean';
+  else if (dist2(x, z, W.pool.x, W.pool.z) < (W.pool.r + 3) ** 2) zone = 'pool';
+  const season = seasonOf(G.day);
+  const night = G.hour >= CONFIG.NIGHT_HOUR[season];
+  return FISH.filter(f =>
+    f.zones.includes(zone) &&
+    (!f.seasons || f.seasons.includes(season)) &&
+    (!f.rainOnly || G.weather === 'rain') &&
+    (!f.nightOnly || night));
+}
+
+/* ---- fishing: cast → bob (1–8s, live stream) → one timing bar ---- */
+const FISHING = { state: 'idle', timer: null, fish: null, cur: 0, dir: 1, zone: [0.4, 0.6], raf: null };
+function tryCast() {
+  const p = player(), fv = facingVector();
+  const fx = p.x + fv.x * 1.6, fz = p.z + fv.z * 1.6;
+  if (!isWaterAt(fx, fz)) { toast('Face the water to cast.'); return; }
+  const table = fishTableHere(fx, fz);
+  if (!table.length) { toast('Nothing biting here today.'); return; }
+  FISHING.state = 'waiting';
+  G.uiOpen = 'fishing';
+  toast('…cast. Watch the water.');
+  hop(); sfx('plink');
+  const wait = 1000 + rand('live') * 7000;
+  FISHING.timer = setTimeout(() => {
+    if (FISHING.state !== 'waiting') return;
+    // weighted pick: common fish twice as likely as rare
+    const weighted = [];
+    for (const f of table) for (let i = 0; i < 4 - f.rarity; i++) weighted.push(f);
+    FISHING.fish = weighted[Math.floor(rand('live') * weighted.length)];
+    FISHING.state = 'bite';
+    sfx('coin');
+    toast('❗ Something’s on! (E)', 1400);
+    FISHING.timer = setTimeout(() => {
+      if (FISHING.state === 'bite') { endFishing('It slipped away. The river keeps its counsel.'); }
+    }, 1300);
+  }, wait);
+}
+function startFishBar() {
+  clearTimeout(FISHING.timer);
+  FISHING.state = 'bar';
+  const width = [0.34, 0.26, 0.18, 0.12][FISHING.fish.rarity];
+  const start = 0.15 + rand('live') * (0.85 - width - 0.15);
+  FISHING.zone = [start, start + width];
+  FISHING.cur = 0; FISHING.dir = 1;
+  const bar = document.createElement('div');
+  bar.id = 'fishBar';
+  bar.style.cssText = 'position:absolute;left:50%;bottom:130px;transform:translateX(-50%);' +
+    'width:300px;height:34px;background:var(--cream);border:4px solid var(--border);border-radius:10px;padding:4px';
+  const zone = document.createElement('div');
+  zone.style.cssText = 'position:absolute;top:4px;bottom:4px;background:#9CBF8A;border-radius:4px;' +
+    'left:' + (4 + FISHING.zone[0] * 292) + 'px;width:' + (width * 292) + 'px';
+  const cur = document.createElement('div');
+  cur.id = 'fishCur';
+  cur.style.cssText = 'position:absolute;top:2px;bottom:2px;width:6px;background:#7A5C3E;border-radius:3px;left:4px';
+  bar.appendChild(zone); bar.appendChild(cur);
+  $('ui').appendChild(bar);
+  const step = () => {
+    if (FISHING.state !== 'bar') return;
+    FISHING.cur += FISHING.dir * 0.016;
+    if (FISHING.cur >= 1) { FISHING.cur = 1; FISHING.dir = -1; }
+    if (FISHING.cur <= 0) { FISHING.cur = 0; FISHING.dir = 1; }
+    cur.style.left = (4 + FISHING.cur * 288) + 'px';
+    FISHING.raf = requestAnimationFrame(step);
+  };
+  step();
+}
+function resolveFishBar() {
+  const hit = FISHING.cur >= FISHING.zone[0] && FISHING.cur <= FISHING.zone[1];
+  const f = FISHING.fish;
+  if (hit) {
+    ITEMS[f.id] = ITEMS[f.id] || { name: f.name, icon: f.icon, sell: f.sell, enterprise: 'Fishing' };
+    addItem(f.id, 1);
+    sfx('pick');
+    endFishing('Caught a ' + f.name + '!');
+    if (!G.flags.firstFish) { G.flags.firstFish = true; jline('First catch: a ' + f.name.toLowerCase() + '. The river and I have an understanding now.'); }
+    G.dayFlags.fished = true;
+  } else {
+    endFishing('Gone. You can almost hear it laughing.');
+  }
+}
+function endFishing(msg) {
+  clearTimeout(FISHING.timer);
+  cancelAnimationFrame(FISHING.raf);
+  const bar = $('fishBar');
+  if (bar) bar.remove();
+  FISHING.state = 'idle';
+  if (G.uiOpen === 'fishing') G.uiOpen = null;
+  if (msg) toast(msg);
+}
+function fishingAct() {          // E while fishing UI owns input
+  if (FISHING.state === 'waiting') { endFishing('Reeled in early. The water shrugs.'); return; }
+  if (FISHING.state === 'bite') { startFishBar(); return; }
+  if (FISHING.state === 'bar') { resolveFishBar(); return; }
+}
+
+/* ---- backpack, sprinklers, kitchen (sinks, §8) ---- */
+CONFIG.BACKPACK_TIERS = [12, 24, 36];
+CONFIG.BACKPACK_PRICES = { 24: 150, 36: 400 };
+function backpackCap() { return G.backpack || 12; }
+function stackCount() { return Object.keys(G.inventory).length; }
+
+const RECIPES = [
+  { id: 'roast', name: 'Field Roast', icon: '🍲', a: 'potato', b: 'carrot', stamina: 45, teacher: 'maren' },
+  { id: 'jam', name: 'Berry Jam', icon: '🫙', a: 'berries', b: 'strawberry', stamina: 35, teacher: 'greta' },
+  { id: 'tea', name: 'Winter Tea', icon: '🍵', a: 'wintergreen', b: 'honeycomb', stamina: 55, teacher: 'isolde' }
+];
+function knownRecipes() { return RECIPES.filter(r => G.flags['recipe_' + r.id]); }
+function maybeTeachRecipe(id) {
+  if (!G.upgrades || !G.upgrades.kitchen) return false;
+  const r = RECIPES.find(r => r.teacher === id && !G.flags['recipe_' + r.id] && (G.hearts[id] || 0) >= 4);
+  if (!r) return false;
+  G.flags['recipe_' + r.id] = true;
+  say([{ who: id, text: 'You’ve got a kitchen now, I hear. Here — my ' + r.name.toLowerCase() + '. ' +
+    ITEMS[r.a].name + ', ' + ITEMS[r.b].name + ', patience. Don’t skip the patience.', mood: 'happy' }], () => {
+    toast('Learned recipe: ' + r.name);
+    jline(CAST[id].name + ' taught me ' + r.name.toLowerCase() + '. The kitchen smells like a home now.');
+  });
+  return true;
+}
+function cookMenu() {
+  const known = knownRecipes();
+  const opts = known.map(r => {
+    const can = (G.inventory[r.a] || 0) >= 1 && (G.inventory[r.b] || 0) >= 1;
+    return r.icon + ' ' + r.name + (can ? '' : ' (missing)');
+  });
+  opts.push('Never mind');
+  showChoice(opts, i => {
+    if (i >= known.length) return;
+    const r = known[i];
+    if ((G.inventory[r.a] || 0) < 1 || (G.inventory[r.b] || 0) < 1) { toast('Missing ingredients.'); return; }
+    takeItem(r.a, 1); takeItem(r.b, 1);
+    G.stamina = Math.min(CONFIG.STAMINA_MAX, G.stamina + r.stamina);
+    sfx('pick');
+    toast(r.name + ' — warmth from the inside out.');
+    G.dayFlags.cooked = true;
+  });
+}
+/* ==================== FESTIVALS & VIGNETTES (phase 3) ==================== */
+// One per season, mid-season day 2, square/gazebo; time frozen; day ends after.
+// Year-1 autumn day 2 keeps its authored meet-the-cast fair (prologue exception).
+
+function gatherCastAtSquare() {
+  const W = G.world, gx = W.gazebo.x, gz = W.gazebo.z;
+  const spots = [
+    ['bramm', -6, 4], ['hetta', -4, 3.4], ['corwin', -2, 4.2], ['isolde', 0, 3.6],
+    ['rolf', 2, 4.2], ['maren', 4, 3.4], ['greta', 6, 4], ['aldwin', -3, 6],
+    ['ness', 5, 6.2], ['fen', -5, 6.4], ['pip', 1, 6.6], ['sable', 7, 6]
+  ];
+  for (const [id, dx, dz] of spots) STORY.spawnVillager(id, gx + dx, gz + dz);
+  actorSetPos(player(), gx, gz + 9);
+  player().face = 0;
+  if (!player().sprite) player().group.rotation.y = 0;
+}
+
+function runFestival(season) {
+  G.dayFlags.festivalDone = true;
+  const endDay = () => { doSleep(); };
+  if (season === 'Spring') {
+    STORY.scene([
+      { fade: () => { gatherCastAtSquare(); } },
+      { say: [
+        'The Seed Swap. Every table in the square wears a checked cloth and a heap of paper packets, hand-labelled, half of them legibly.',
+        { who: 'greta', text: 'Rules are the same as always: bring what you’ve got, take what you need, argue about tomatoes for three hours.' },
+        { who: 'rolf', text: 'My rows are planned since midwinter. I’m here for the arguing.' },
+        { who: 'maren', text: 'And the new farm gets the newcomer’s bundle! House rule. Argue THAT, Rolf.' },
+        'Someone presses a fat bundle of mixed packets into your hands, and the afternoon dissolves into seed talk and pie.'
+      ] },
+      { fn: () => {
+        for (const id of ['seed_cabbage', 'seed_peas', 'seed_strawberry']) addItem(id, 3);
+        jline('The Seed Swap. Came home with cabbage, peas and strawberry starts, plus three contradictory opinions about each.');
+        sfx('coin');
+      } },
+      { fn: endDay }
+    ]);
+  } else if (season === 'Summer') {
+    STORY.scene([
+      { fade: () => {
+        gatherCastAtSquare();
+        G.hour = 20.5;
+        applyGrade();
+      } },
+      { say: [
+        'Firefly Night. The whole town walks down to the water with paper lanterns, and the dusk fills with small drifting lights — some of them insects, some of them wishes.',
+        { who: 'pip', text: 'I counted FIFTY-ONE fireflies! Fifty-two! They keep MOVING!' },
+        { who: 'fen', text: 'The lanterns go out on the water. The fireflies come back to the trees. Everything returns somewhere.' },
+        { who: 'maren', text: 'To the season half-done — may the second half be gentler, and the tomatoes be many.' },
+        'You set a lantern on the current and watch it go. It doesn’t feel like losing anything.'
+      ] },
+      { fn: () => {
+        jline('Firefly Night. Lanterns on the river, the town quiet in the good way. Even Ness came, and stood at the back, and stayed.');
+        STORY.heart('maren', 1);
+      } },
+      { fn: endDay }
+    ]);
+  } else if (season === 'Autumn') {
+    const best = G.flags.bestPumpkin || 0;
+    const cal = calendarDay(G.day).r;
+    const rival1 = 55 + Math.floor(cal() * 15);
+    const rival2 = 55 + Math.floor(cal() * 15);
+    const rolfSize = 78 + Math.floor(cal() * 8);
+    const win = best > rolfSize;
+    STORY.scene([
+      { fade: () => { gatherCastAtSquare(); } },
+      { say: [
+        'The County Fair. Pie tables, a fiddle, and the judging stand groaning under this year’s pumpkins.',
+        { who: 'aldwin', text: 'The gourds! ' + (best ? 'Four entries this year — including, I note with interest, one from the new farm.' : 'Three entries this year. The new farm abstains — wisely or timidly, the record will show.') },
+        ...(best ? [
+          { who: 'aldwin', text: 'The scores: the Widow Hale’s at ' + rival1 + ' points, Pip’s alarming entry at ' + rival2 + ', Rolf’s at ' + rolfSize + '… and the new farm’s at ' + best + '.' },
+          win ? { who: 'rolf', text: '…Huh. Well. There it is. You watered every day, didn’t you. Every single day. …Good. Somebody should push me.', mood: 'sad' }
+              : { who: 'rolf', text: 'The ribbon stays east of the river. ' + (best > 70 ? 'But that’s a real pumpkin you grew, neighbor. Next year, then.' : 'Keep your streaks honest and come back heavier.') }
+        ] : [
+          { who: 'rolf', text: 'Ribbon number six. The secret’s the streak — every day, no gaps. Grow one next year and I’ll even judge it fair.' }
+        ]),
+        'The afternoon runs long and golden: pie, the fiddle, a wheelbarrow race that ends in the creek.'
+      ] },
+      { fn: () => {
+        if (win) {
+          G.money += 100;
+          G.ledger.entries.push({ day: G.day, amount: 100, enterprise: 'Odd Jobs', note: 'Fair ribbon prize' });
+          STORY.heart('rolf', 1);
+          jline('WON THE FAIR. The ribbon is blue and the pumpkin was ' + best + ' points of stubborn daily watering. Rolf shook my hand like it cost him, which is how you know it counted.');
+        } else if (best) {
+          jline('Entered the fair: ' + best + ' points. Rolf took the ribbon again at ' + rolfSize + '. "Next year" is starting to sound like a family motto.');
+        } else {
+          jline('The County Fair came and went without a pumpkin from my field. Noted, calendar. Noted.');
+        }
+      } },
+      { fn: endDay }
+    ]);
+  } else if (season === 'Winter') {
+    STORY.scene([
+      { fade: () => {
+        gatherCastAtSquare();
+        G.weather = 'snow';
+        G.hour = 19;
+        applyGrade();
+      } },
+      { say: [
+        'Starlight Eve. Snow through lantern light, the gazebo strung with little flames, the whole town breathing steam.',
+        { who: 'maren', text: 'The draw! One name to a slip, one gift to a name. The box has spoken since before any of us could argue with it.' },
+        'Slips are drawn, parcels change hands, someone laughs too loudly at a hand-knit hat.',
+        { who: 'aldwin', text: 'Another year in the books. Some of it even balanced. We’ll take it, valley. We’ll take it.' }
+      ] },
+      { fn: () => {
+        addItem('scarf', 1);
+        jline('Starlight Eve again. Snow, lanterns, the draw. A year ago I was the stranger who got the town’s scarf. Tonight I knew every name in the square.');
+      } },
+      { fn: () => { G.flags.pendingYearReview = true; doSleep(); } }
+    ]);
+  }
+}
+
+/* ---- friendship vignettes: two-choice scenes for focus, single for rest ---- */
+const VIG = {
+  bramm: {
+    3: { lines: [{ who: 'bramm', text: 'Slow hour. Sit. My father used to keep a stool by the counter for exactly one regular. It’s been empty a while. Hm.' }],
+      choice: ['Sit a while', 'Ask about his father'],
+      replies: ['You sit. He rings up two customers and tells you which fields they’re from. It’s better than it sounds.',
+        { who: 'bramm', text: 'Ran this store forty years. Never once took a Restday off the books. I used to think that was the lesson. Hm. Lately I wonder.' }] },
+    6: { lines: [{ who: 'bramm', text: 'Here. Failed order — crate of preserves, buyer skipped town. Take a jar. No, it’s not kindness, it’s inventory management. Hm.' }],
+      choice: ['Take it, thank him', 'Pay for it anyway'],
+      replies: ['You take the jar. He grunts. The grunt has warmth in it, if you know the dialect.',
+        { who: 'bramm', text: 'You— fine. Full price. You’re the worst bargain-hunter this valley has ever produced, and I include the sheep.', mood: 'happy' }] },
+    9: { lines: [{ who: 'bramm', text: 'I don’t say this kind of thing. So I’ll say it once and we won’t revisit it: this store nearly closed, two winters back. Lately I remember why I keep it open. Hm.' }],
+      choice: ['“The town needs it.”', '“You needed a good year.”'],
+      replies: [{ who: 'bramm', text: 'The town. Yes. That’s what I tell the ledger. …Thanks for sitting that hour, back then. It mattered.' },
+        { who: 'bramm', text: 'Hm. A good year. Is that what this is. …Yes. Suppose it is.', mood: 'happy' }] }
+  },
+  hetta: {
+    3: { lines: [{ who: 'hetta', text: 'Watch this weld. No — actually watch. Most people look at the sparks. The work is where the metal goes quiet.' }],
+      choice: ['Watch the quiet part', 'Ask what she’s making'],
+      replies: [{ who: 'hetta', text: 'There. You saw it. Most don’t. You’ll take better care of your tools now — that’s how it works.' },
+        { who: 'hetta', text: 'Hinges. Forty of them. Nobody sings songs about hinges, and every door in the valley depends on me. I find that extremely funny.' }] },
+    6: { lines: [{ who: 'hetta', text: 'I priced out a new forge hood this morning. Wrote the number down, laughed, filed it under someday. You farm. You know the folder.' }],
+      choice: ['“Someday comes.”', '“What would it change?”'],
+      replies: [{ who: 'hetta', text: 'It does. Usually the year you stop checking the folder. Keep swinging, farmer.', mood: 'happy' },
+        { who: 'hetta', text: 'Hotter fire, cleaner steel, iron tools worth the name. A better valley, one edge at a time. …Someday.' }] },
+    9: { lines: [{ who: 'hetta', text: 'The first thing I ever forged was a hoof-pick. Ugly as sin. My teacher said "again," four hundred times. This forge is my "again." You understand that, I think — your field says so.' }],
+      choice: ['“Four hundred and one.”', 'Say nothing; nod'],
+      replies: [{ who: 'hetta', text: 'HA. Yes. Exactly that. Four hundred and one, forever. You and I are the same animal, farmer.', mood: 'happy' },
+        { who: 'hetta', text: '…Right answer. The quiet part again. You keep seeing it.', mood: 'happy' }] }
+  },
+  corwin: {
+    3: { lines: [{ who: 'corwin', text: 'Smell that? Fresh-cut cedar! I could build a whole house today! I won’t! But I COULD!' }],
+      choice: ['“Build the house.”', '“Save it for mine.”'],
+      replies: [{ who: 'corwin', text: 'THAT’S the spirit! Okay, not a house. A birdhouse. Momentum is momentum!' },
+        { who: 'corwin', text: 'For yours! Yes! The day you knock with lumber money, I’m dropping everything. Fair warning to everything!' }] },
+    6: { lines: [{ who: 'corwin', text: 'Can I tell you a secret? The gazebo — my grandfather built it. Every festival happens inside my family’s best day of work. I never say that out loud!' }],
+      choice: ['“It’s held up beautifully.”', '“What will yours be?”'],
+      replies: [{ who: 'corwin', text: 'Hasn’t it?! Sixty years of weather and dancing! Good bones, GREAT bones!', mood: 'happy' },
+        { who: 'corwin', text: '…Huh. Nobody’s asked me that. Something at your farm, maybe. Something that outlives us both. Now I HAVE to.', mood: 'surprised' }] },
+    9: { lines: [{ who: 'corwin', text: 'I did the math — I’ve fixed every roof in this valley at least twice. Every one! You know what that means? When it rains, everybody’s dry inside something I touched.' }],
+      choice: ['“That’s a legacy.”', '“Even Rolf’s?”'],
+      replies: [{ who: 'corwin', text: 'A legacy! Yes! Rain as a compliment! I’m going to enjoy every storm from now on, and that’s YOUR fault.', mood: 'happy' },
+        { who: 'corwin', text: 'THREE times, Rolf’s! He climbs up to inspect and always finds one nail to complain about. One! I leave it loose on purpose now. Our little tradition!', mood: 'happy' }] }
+  },
+  isolde: {
+    3: { lines: [{ who: 'isolde', text: 'Oh — you caught me reading on the clock. (The clock and I have an arrangement.) It’s a book about soil, actually. Your line of work.' }],
+      choice: ['“Read me something.”', '“Doctors need breaks too.”'],
+      replies: [{ who: 'isolde', text: '“The health of the field is written a season before it shows." (It’s about dirt. It’s also not about dirt. The good books do that.)' },
+        { who: 'isolde', text: '(Thank you.) Most people want the doctor efficient. Efficient and well are different words.', mood: 'happy' }] },
+    6: { lines: [{ who: 'isolde', text: 'I keep a list of everyone in the valley and what they never mention. Bramm’s knee. Greta’s back. Yours is sleep, currently. (This is a professional intervention disguised as a chat.)' }],
+      choice: ['“Caught me. I’ll sleep.”', '“What’s on YOUR list?”'],
+      replies: [{ who: 'isolde', text: 'Good. (The disguise worked. They don’t always.)', mood: 'happy' },
+        { who: 'isolde', text: '…Winters. Long ones. (There. Now the list is honest.) Come for tea when the snow gets loud.', mood: 'sad' }] },
+    9: { lines: [{ who: 'isolde', text: 'I trained in the city, you know. I came back because a valley knows you. The city examines; the valley recognizes. (I practiced saying that. Did it land?)' }],
+      choice: ['“It landed.”', '“The valley’s lucky.”'],
+      replies: [{ who: 'isolde', text: '(Oh good.) You’re part of the recognizing now, incidentally. The valley knows your footsteps on the bridge. I checked.', mood: 'happy' },
+        { who: 'isolde', text: '(…That was better than my line.) The luck runs both directions. It usually does, here.', mood: 'happy' }] }
+  },
+  rolf: {
+    3: { lines: [{ who: 'rolf', text: 'Your rows are crooked. Third field this spring I’ve said that to. Difference is, yours are crooked and ALIVE. Come look at mine.' }],
+      choice: ['Admire the straight rows', 'Defend the crooked ones'],
+      replies: [{ who: 'rolf', text: 'Twenty years of string lines. Straight rows don’t grow better. They just tell the neighbors you mean it.' },
+        { who: 'rolf', text: 'Ha. "Character." That’s what my father called his crooked rows too. Fine farmer. Terrible rows. …Carry on, then.' }] },
+    6: { lines: [{ who: 'rolf', text: 'Storm took my east fence last night. Shoebox says I can’t afford the posts till the co-op check lands. The shoebox is always right. That’s the worst thing about it.' }],
+      choice: ['Offer to help with the fence', '“The shoebox lies by omission.”'],
+      replies: [{ who: 'rolf', text: '…You’d do that. Huh. Saturday, then. Bring gloves, not opinions.', mood: 'happy' },
+        { who: 'rolf', text: 'Meaning what — that I’m richer than my own arithmetic? …Aldwin says things like that. I’m starting to hate how often you people are right.' }] },
+    9: { gated: 'stage5', lines: [{ who: 'rolf', text: 'Fair’s coming. I checked your patch from the road — don’t look at me like that, everybody checks everybody’s patch. It’s good. It’s… it might be better than mine.' }],
+      choice: ['“May the best gourd win.”', '“Yours taught mine.”'],
+      replies: [{ who: 'rolf', text: 'It will. Whichever field it’s from. …That’s the first time I’ve meant that. Don’t tell the pumpkin.', mood: 'happy' },
+        { who: 'rolf', text: '…That’s either very kind or very good strategy. Both, knowing you. See you at the judging stand, neighbor.', mood: 'happy' }] }
+  },
+  maren: {
+    3: { lines: [{ who: 'maren', text: 'Quiet afternoon. You know what this bar hears more than anything? Not gossip. Weather. People practice their feelings on the weather first.' }],
+      choice: ['“What’s the forecast?”', '“What do YOU practice on?”'],
+      replies: [{ who: 'maren', text: 'Warm front moving in, per Greta’s shoulders. Storm per Rolf’s hat brim. I read barometers, friend, they just walk in on two legs.', mood: 'happy' },
+        { who: 'maren', text: '…Soup. I practice on soup. Bad week, spicy pot. You’re the first to ask, which lands you a free bowl.', mood: 'surprised' }] },
+    6: { lines: [{ who: 'maren', text: 'I nearly sold this place, four years back. Had the papers ON this bar. Then Pip’s mother came in out of the rain, and the room did the thing it does. I tore them up by last call.' }],
+      choice: ['“The room did what?”', '“The valley’s glad you stayed.”'],
+      replies: [{ who: 'maren', text: 'Got warmer than the stove explains. Rooms full of neighbors do it. Can’t sell that. Nobody’d meet the asking price anyway — it’s everything.', mood: 'happy' },
+        { who: 'maren', text: 'The valley says so in nightly installments, bless it. Anyway — your stool’s third from the left. Forever, now.', mood: 'happy' }] },
+    9: { lines: [{ who: 'maren', text: 'Between us: I know every regular’s pour before the door shuts. But you — you I still have to ask. Keeps a barkeep humble. Don’t you dare become predictable.' }],
+      choice: ['“Surprise me tonight.”', '“You’re the town’s hearth, you know.”'],
+      replies: [{ who: 'maren', text: 'DANGEROUS words in this establishment. One mystery pour, coming up. If you hate it, that’s character-building.', mood: 'happy' },
+        { who: 'maren', text: '…Hearth. Huh. My mother used that word for the old innkeeper. Guess it’s mine now. Guess I’ll keep it lit.', mood: 'surprised' }] }
+  },
+  greta: {
+    3: { lines: [{ who: 'greta', text: 'Come watch the sunrise chores sometime. Everybody wants animals till they meet five a.m. Five a.m. is the whole test.' }],
+      choice: ['“I’m up anyway.”', '“What’s it like?”'],
+      replies: [{ who: 'greta', text: 'I know you are. I see your chimney from my gate. That’s why I’m telling YOU and not the other daydreamers.', mood: 'happy' },
+        { who: 'greta', text: 'Quiet, cold, and the animals are honestly glad to see you. Best hour there is. Don’t tell the afternoon.' }] },
+    6: { lines: [{ who: 'greta', text: 'Bank turned me down for the barn, years back. Not enough records, they said. I had records — in a drawer, in three hands, some in my mother’s. Wasn’t enough to LOOK like a ranch on paper.' }],
+      choice: ['“Paper isn’t the ranch.”', '“What would a barn change?”'],
+      replies: [{ who: 'greta', text: 'No — but paper opens gates, same as any latch. I’m learning the trick of it now. Watch this space, farmer.', mood: 'happy' },
+        { who: 'greta', text: 'Winter calving indoors. Feed dry through the wet months. Maybe a cow with your name on it, if you’re ready by then.', mood: 'happy' }] },
+    9: { lines: [{ who: 'greta', text: 'My best layer — the one I promised you. She’s from a line my grandmother started. Sixty years of hens, one long thread. You’re getting a piece of the thread, when it’s time. That’s not a small thing from me.' }],
+      choice: ['“I’ll do right by it.”', '“Tell me about your grandmother.”'],
+      replies: [{ who: 'greta', text: 'I know you will. That’s why the promise got made. The goose vouched for you early, if you want the truth.', mood: 'happy' },
+        { who: 'greta', text: 'She could call a storm by the way the herd stood. Never wrote a thing down and never lost an animal. The drawer full of papers was her one bad habit I inherited.', mood: 'happy' }] }
+  },
+  aldwin: { 5: { lines: [{ who: 'aldwin', text: 'Thirty years of farm visits and I can tell you the valley’s one true crop rotation: worry, work, wonder. In that order, every season, every farm. You’re in the wonder part just now. Enjoy the soil while it’s new.' }],
+    choice: ['“And after wonder?”', '“Which part are you in?”'],
+    replies: [{ who: 'aldwin', text: 'Worry again, of course. The trick — and it took me a career to learn it — is that the wonder doesn’t leave. It just learns to share the field.' },
+      { who: 'aldwin', text: 'Wonder, permanently. Retirement’s one advantage. That and being right at other people’s fences instead of my own.', mood: 'happy' }] } },
+  ness: { 5: { lines: [{ who: 'ness', text: '…You fish quiet. Didn’t expect that. Most farmers fish like they’re arguing with the water. Sit. Left side.' }],
+    choice: ['Sit and fish', '“Who taught you?”'],
+    replies: ['An hour passes. Four words are spoken, two fish are caught, and it is somehow one of the better conversations you’ve had.',
+      { who: 'ness', text: 'River did. Same as taught everybody, if they’d shut up long enough. …You shut up fine. High praise. Don’t spend it.' }] } },
+  fen: { 5: { lines: [{ who: 'fen', text: 'You leave things at the ledge. I sweep around them. We’ve never talked about it. That’s right, I think — but I wanted you to know I see it. The marker sees it too.' }],
+    choice: ['“What IS the marker?”', 'Leave it unspoken'],
+    replies: [{ who: 'fen', text: 'Old. Older than the town’s name. Past that — some questions end at the ledge. It likes you. That’s all I know, and it’s enough.' },
+      { who: 'fen', text: '…Yes. Exactly. You understand the trail better than most who walk it.', mood: 'happy' }] } },
+  pip: { 5: { lines: [{ who: 'pip', text: 'Okay. OKAY. Big news. I found a fox den. A WHITE one lives there. Nobody believes me except Fen, and Fen doesn’t count because Fen believes everything quietly.' }],
+    choice: ['“I believe you.”', '“Show me the den.”'],
+    replies: [{ who: 'pip', text: 'YES. Officially witnessed! When I’m famous for fox science you can say you knew first!', mood: 'happy' },
+      { who: 'pip', text: 'Can’t! Foxes MOVE, that’s the whole thing about foxes! But dusk, by the treeline, if you’re QUIET and also LUCKY— keep your eyes up, is all I’m saying.', mood: 'surprised' }] } },
+  sable: { 5: { lines: [{ who: 'sable', text: 'Four towns, I told you once. Here’s the part I left out: I left each one the day somebody asked me to stay. …The notebook thinks I should mention that this town hasn’t asked. It just set a place.' }],
+    choice: ['“Then stay unasked.”', '“What’s the difference?”'],
+    replies: [{ who: 'sable', text: '…Stay unasked. Hm. The notebook is underlining. That may be the most useful sentence anyone’s handed me in four towns.', mood: 'surprised' },
+      { who: 'sable', text: 'Asking makes it a door you owe. A set place is just… there. Daily. No debt. This valley sets places without noticing it does it. That’s the finding, so far.' }] } }
+};
+
+function tryVignette(id) {
+  const v = VIG[id];
+  if (!v) return false;
+  const hearts = G.hearts[id] || 0;
+  const thresholds = Object.keys(v).map(Number).sort((a, b) => a - b);
+  for (const t of thresholds) {
+    if (hearts < t || G.flags['vig_' + id + '_' + t]) continue;
+    const sc = v[t];
+    if (sc.gated === 'stage5' && (G.network.stage || 0) < 5) continue;
+    G.flags['vig_' + id + '_' + t] = true;
+    say(sc.lines, () => {
+      showChoice(sc.choice, i => {
+        const reply = sc.replies[i];
+        say([typeof reply === 'string' ? reply : reply], () => {
+          STORY.heart(id, 1);
+          jline('A moment with ' + CAST[id].name + ' today — the kind that doesn’t fit in small talk. (' + t + ' hearts.)');
+        });
+      });
+    });
+    return true;
+  }
+  return false;
+}
+/* ================ THE NETWORK ARC: stages 3–4 + contracts ================ */
+// Witnessed on foot, never a menu abstraction (§11).
+
+function connectShop(id, glyphKey) {
+  G.network.connected[id] = true;
+  sfx('chime');
+  if (R.glyphs[glyphKey || id]) R.glyphs[glyphKey || id].visible = true;
+}
+
+const ARC = {
+  // Stage 3a — Hetta: estimates → invoices, visible reinvestment
+  runHettaConnect(shopAfter) {
+    G.flags.hettaConnectDone = true;
+    STORY.scene([
+      { say: [
+        { who: 'hetta', text: 'Perfect timing. Look at this wall — twenty years of estimates in chalk, and every winter I re-chalk the ones nobody paid me for yet.' },
+        { who: 'hetta', text: 'Bramm wouldn’t shut up about his glyph. So: as of this morning, estimates go out as proper invoices, and they settle when the work’s done. Watch.' },
+        'She taps the counter. A green glyph wakes next to the till, steady as a pilot light. Somewhere in the ledger of the world, a column balances.'
+      ] },
+      { fn: () => {
+        connectShop('forge');
+        STORY.heart('hetta', 1);
+        addForgeAwning();
+        jline('Hetta’s forge joined the network today. By afternoon she’d priced the new forge hood out loud — from the "someday" folder to a delivery date, in one morning.');
+        ARC.updateStage();
+      } },
+      { say: [
+        { who: 'hetta', text: 'First thing I’m buying with money that actually arrives: that forge hood. Someday just got a delivery date, farmer.', mood: 'happy' }
+      ] }
+    ], shopAfter);
+  },
+  // Stage 3b — Maren: tabs
+  runMarenConnect() {
+    G.flags.marenConnectDone = true;
+    STORY.scene([
+      { say: [
+        { who: 'maren', text: 'You’re about to witness history: the death of the chalkboard tab. Forty names up there. Some of these debts are old enough to vote.' },
+        { who: 'maren', text: 'Hetta showed me hers, Bramm showed me his, and I’m not being the last chalkboard in the valley. Watch the counter, friend.' },
+        'The glyph blinks on beside the taps. Maren wipes the board clean with one long swipe she has clearly been saving up for years.'
+      ] },
+      { fn: () => {
+        connectShop('tavern');
+        STORY.heart('maren', 1);
+        G.flags.forecastUnlocked = true;
+        jline('The Bluebird joined the network — Maren erased the tab board like a woman settling a decades-old score. The Ledger grew a forecast page tonight. The future, itemized.');
+        ARC.updateStage();
+        toast('The Ledger can see ahead now — forecast unlocked.');
+      } }
+    ]);
+  },
+  // Stage 4 — the chain: one payment moves through town, counter to counter
+  runChainMorning() {
+    G.flags.chainDone = true;
+    const W = G.world;
+    const at = id => { const s = W.shops.find(s => s.id === id); return { x: s.x + 1.2, z: s.z + s.d / 2 + 1.6 }; };
+    say(['A crisp morning, and the town is oddly awake: Greta at her gate with papers, Corwin loading lumber, Hetta’s forge already lit. Something is moving through the valley today.']);
+    const greta = STORY.spawnVillager('greta', W.ranchGate.x - 2, W.ranchGate.z + 1);
+    greta.scriptLock = true;
+    greta.waypoints = [{ x: at('carpenter').x, z: at('carpenter').z, onArrive: () => {
+      sfx('chime');
+      toast('Greta’s barn grant → Corwin’s invoice: settled. Instantly.', 3200);
+      connectShop('ranch');
+      greta.scriptLock = false; delete greta.schedKey;
+      const corwin = STORY.spawnVillager('corwin', at('carpenter').x + 1.5, at('carpenter').z);
+      corwin.scriptLock = true;
+      corwin.waypoints = [{ x: at('forge').x, z: at('forge').z, onArrive: () => {
+        sfx('chime');
+        toast('Corwin → Hetta: iron order, paid before he left the counter.', 3200);
+        connectShop('carpenter');
+        corwin.scriptLock = false; delete corwin.schedKey;
+        const hetta = STORY.spawnVillager('hetta', at('forge').x + 1.5, at('forge').z);
+        hetta.scriptLock = true;
+        hetta.waypoints = [{ x: at('general').x, z: at('general').z, onArrive: () => {
+          sfx('chime');
+          toast('Hetta’s supply order lands at Bramm’s. Four settlements, one morning.', 3600);
+          hetta.scriptLock = false; delete hetta.schedKey;
+          G.network.stage = 4;
+          jline('Greta’s barn money went through four hands before lunch, and nobody chased anybody. I watched it happen on foot, counter to counter, chime to chime.');
+          say(['By noon the whole thing is done: grant to barn, barn to lumber, lumber to iron, iron to shelves. Money moved through ' + G.world.townName + ' the way the river does — without stopping to be begged.']);
+        } }];
+      } }];
+    } }];
+  },
+  updateStage() {
+    const c = G.network.connected;
+    if (G.network.stage >= 4) return;
+    if (c.general && c.forge && c.tavern) G.network.stage = 3;
+    else if (c.general) G.network.stage = 2;
+  },
+  // called from STORY.tick
+  tick() {
+    const year = yearOf(G.day), season = seasonOf(G.day);
+    if (G.mode !== 'play' || G.uiOpen) return;
+    if (year >= 2 && season === 'Summer' && (G.network.stage || 0) >= 3 &&
+        !G.flags.chainDone && G.hour >= 9 && G.hour < 12) {
+      ARC.runChainMorning();
+    }
+  }
+};
+
+// Hetta's visible reinvestment: a new awning over the forge front
+function addForgeAwning() {
+  const s = G.world.shops.find(s => s.id === 'forge');
+  if (!s || R.forgeAwning) return;
+  const awn = new THREE.Mesh(new THREE.BoxGeometry(s.w * 0.8, 0.12, 2.2),
+    new THREE.MeshLambertMaterial({ color: 0x5E8E8A }));
+  awn.position.set(s.x, 2.6, s.z + s.d / 2 + 1.1);
+  awn.rotation.x = 0.18;
+  R.worldGroup.add(awn);
+  R.forgeAwning = awn;
+}
+
+/* ======================= CUSTOMER CONTRACTS (§10) ======================== */
+// A standing order each Restday at +15%, proposed BY the villager.
+const CONTRACT_DEFS = {
+  maren:  { good: 'egg',         qty: 4, conn: 'tavern',  ask: 'The Bluebird goes through eggs like the river goes through water. A standing order — four eggs, every Restday, fifteen percent over market, settled the moment they land. You’d be the tavern’s farm.' },
+  bramm:  { good: 'turnip',      qty: 6, conn: 'general', ask: 'The window shelf. People ask whose produce it is. So: your goods, my window, every Restday — six of your turnips to start, fifteen over market, settled instant. Storefront partners. Hm.' },
+  isolde: { good: 'wintergreen', qty: 3, conn: null,      ask: 'The clinic goes through more wintergreen than I can gather between patients. Three bunches every Restday? Fifteen percent over market — (I checked what fair looks like. Twice.)' }
+};
+function contractEligible(id) {
+  const def = CONTRACT_DEFS[id];
+  if (!def || (G.contracts && G.contracts[id])) return false;
+  if ((G.hearts[id] || 0) < 6) return false;
+  if (def.conn && !G.network.connected[def.conn]) return false;
+  return true;
+}
+function proposeContract(npc) {
+  const id = npc.id, def = CONTRACT_DEFS[id];
+  if (!contractEligible(id)) return false;
+  ITEMS.egg = ITEMS.egg || { name: 'Egg', icon: '🥚', sell: 8, enterprise: 'Eggs' };
+  say([
+    { who: id, text: def.ask },
+    { who: id, text: '(A standing order is an honor here — it means the town counts on you.)' }
+  ], () => {
+    showChoice(['Shake on it', 'Not yet'], i => {
+      if (i !== 0) { say([{ who: id, text: 'When you’re ready. The offer keeps.' }]); return; }
+      G.contracts = G.contracts || {};
+      G.contracts[id] = { good: def.good, qty: def.qty, premium: 1.15, status: 'active', miss: 0 };
+      sfx('chime');
+      STORY.heart(id, 1);
+      say([{ who: id, text: 'Then it’s standing. First delivery this Restday. Welcome to being counted on.', mood: 'happy' }]);
+      jline(CAST[id].name + ' asked me to be their standing supplier — ' + def.qty + '× ' + ITEMS[def.good].name.toLowerCase() + ' every Restday at a premium. In this valley, that’s a medal.');
+    });
+  });
+  return true;
+}
+function resumeContract(npc) {
+  const id = npc.id, ct = G.contracts && G.contracts[id];
+  if (!ct || ct.status !== 'paused') return false;
+  if ((G.inventory[ct.good] || 0) < ct.qty) {
+    say([{ who: id, text: 'The standing order’s on pause — no hard feelings. Bring ' + ct.qty + '× ' + ITEMS[ct.good].name.toLowerCase() + ' in person and we’ll call it running again.' }]);
+    return true;
+  }
+  takeItem(ct.good, ct.qty);
+  ct.status = 'active'; ct.miss = 0;
+  const pay = Math.round(ITEMS[ct.good].sell * ct.qty * ct.premium);
+  G.money += pay;
+  G.ledger.entries.push({ day: G.day, amount: pay, enterprise: ITEMS[ct.good].enterprise, note: 'Contract resumed — ' + CAST[id].name });
+  sfx('chime');
+  say([{ who: id, text: 'Hand-delivered and back in business. That’s all a pause ever needs to be.', mood: 'happy' }]);
+  jline('Squared things with ' + CAST[id].name + ' in person. The standing order stands again.');
+  return true;
+}
+// Rollover step 9: contract fulfillment on Restdays.
+function fulfillContracts(newDay) {
+  if (!isRestday(newDay) || !G.contracts) return;
+  for (const id in G.contracts) {
+    const ct = G.contracts[id];
+    if (ct.status !== 'active') continue;
+    const have = G.inventory[ct.good] || 0;
+    if (have >= ct.qty) {
+      takeItem(ct.good, ct.qty);
+      const pay = Math.round(ITEMS[ct.good].sell * ct.qty * ct.premium);
+      const def = CONTRACT_DEFS[id];
+      const instant = def.conn && G.network.connected[def.conn];
+      if (instant) {
+        G.money += pay;
+        G.ledger.entries.push({ day: newDay, amount: pay, enterprise: ITEMS[ct.good].enterprise, note: 'Standing order — ' + CAST[id].name });
+      } else {
+        G.pendingChecks.push({ amount: pay, arriveDay: newDay + CONFIG.CHECK_LAG_DAYS, label: CAST[id].name + '’s standing order', enterprises: { [ITEMS[ct.good].enterprise]: pay } });
+      }
+      ct.miss = 0;
+      jline('Standing order filled: ' + ct.qty + '× ' + ITEMS[ct.good].name.toLowerCase() + ' to ' + CAST[id].name + (instant ? ' — settled by sunup.' : ' — check to follow.'));
+    } else {
+      ct.miss++;
+      if (ct.miss >= 2) {
+        ct.status = 'paused';
+        G.mail.push({ day: newDay, from: CAST[id].name, title: 'About the standing order',
+          body: 'Two Restdays without ' + ITEMS[ct.good].name.toLowerCase() + 's — so I’m pausing the order, not ending it. Farms have seasons; I know how it goes. Bring a delivery by in person whenever, and it starts right back up. — ' + CAST[id].name, read: false });
+        jline('Missed ' + CAST[id].name + '’s order twice running. The pause letter was kinder than I deserved, which is somehow worse.');
+      } else {
+        jline('Came up short for ' + CAST[id].name + '’s standing order. One miss is weather; two is a habit.');
+      }
+    }
+  }
+}
+
+/* ---- forecast strip: projected 6-day income (stage 3) ---- */
+function computeForecast() {
+  let total = 0;
+  const parts = [];
+  const checks = G.pendingChecks.reduce((s, c) => s + c.amount, 0);
+  if (checks) { total += checks; parts.push('checks $' + checks); }
+  const inv = (G.jobs || []).filter(j => j.status === 'invoiced').reduce((s, j) => s + j.reward, 0);
+  if (inv) { total += inv; parts.push('invoices $' + inv); }
+  let regrow = 0;
+  for (const t of G.world.tiles) {
+    if (!t.crop || t.dead) continue;
+    const c = CONFIG.CROPS[t.crop];
+    if (c.regrow) regrow += Math.floor(6 / c.regrow) * c.sell;
+    else if (t.grown < c.days) regrow += c.sell;
+  }
+  if (regrow) { total += regrow; parts.push('field ~$' + regrow); }
+  let contracts = 0;
+  for (const id in (G.contracts || {})) {
+    const ct = G.contracts[id];
+    if (ct.status === 'active') contracts += Math.round(ITEMS[ct.good].sell * ct.qty * ct.premium) * 2;
+  }
+  if (contracts) { total += contracts; parts.push('standing orders $' + contracts); }
+  return { total, parts };
+}
+/* ================= AUDIO: music engine (phase 3, all synth) ============== */
+// A tiny 16-step sequencer. All tracks original; the jukebox evokes 90s
+// country as a genre — twangy lead, walking bass, train-beat brushes (§15).
+const MUS = { current: null, timer: null, step: 0, vol: 0.30, jukeboxUntil: 0 };
+function nf(n) { return n ? 440 * Math.pow(2, (n - 69) / 12) : 0; }
+function mvoice(freq, dur, type, vol) {
+  const ctx = audioCtx();
+  if (!ctx || !freq || AU.vol <= 0) return;
+  const t = ctx.currentTime;
+  const o = ctx.createOscillator(), g = ctx.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol * MUS.vol * AU.vol, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g); g.connect(ctx.destination);
+  o.start(t); o.stop(t + dur + 0.05);
+}
+// step arrays: 16 steps, midi note numbers (0 = rest)
+const TRACKS = {
+  spring: { bpm: 76, bassType: 'sine', leadType: 'triangle',
+    bass: [45, 0, 0, 0, 52, 0, 0, 0, 50, 0, 0, 0, 52, 0, 0, 0],
+    lead: [69, 0, 72, 0, 76, 0, 72, 0, 74, 0, 72, 0, 69, 0, 64, 0] },
+  summer: { bpm: 84, bassType: 'sine', leadType: 'triangle',
+    bass: [43, 0, 0, 0, 50, 0, 0, 0, 48, 0, 0, 0, 50, 0, 43, 0],
+    lead: [67, 0, 71, 74, 0, 74, 71, 0, 72, 0, 71, 67, 0, 62, 0, 0] },
+  autumn: { bpm: 68, bassType: 'sine', leadType: 'triangle',
+    bass: [41, 0, 0, 0, 48, 0, 0, 0, 46, 0, 0, 0, 45, 0, 0, 0],
+    lead: [65, 0, 0, 69, 0, 72, 0, 69, 68, 0, 65, 0, 63, 0, 60, 0] },
+  winter: { bpm: 58, bassType: 'sine', leadType: 'sine',
+    bass: [38, 0, 0, 0, 0, 0, 45, 0, 43, 0, 0, 0, 0, 0, 41, 0],
+    lead: [62, 0, 0, 0, 65, 0, 69, 0, 0, 0, 67, 0, 0, 62, 0, 0] },
+  // Jukebox: "Gravel Road Home" — original, twangy square lead, walking bass
+  gravel: { bpm: 104, bassType: 'triangle', leadType: 'square', juke: true,
+    bass: [40, 0, 44, 0, 47, 0, 44, 0, 45, 0, 49, 0, 52, 0, 49, 0],
+    lead: [64, 64, 0, 68, 0, 71, 68, 0, 69, 0, 73, 69, 0, 76, 0, 71] },
+  // Jukebox: "Checks in the Mail" — original, a shuffling lament (retires after stage 3)
+  checks: { bpm: 92, bassType: 'triangle', leadType: 'square', juke: true,
+    bass: [38, 0, 0, 45, 0, 0, 41, 0, 43, 0, 0, 50, 0, 0, 45, 0],
+    lead: [62, 0, 65, 0, 62, 0, 60, 0, 58, 0, 62, 0, 65, 0, 69, 67] }
+};
+const JUKEBOX = [
+  { id: 'gravel', title: 'Gravel Road Home' },
+  { id: 'checks', title: 'Checks in the Mail', retiresAtStage: 3 }
+];
+function playTrack(name) {
+  stopMusic();
+  const tr = TRACKS[name];
+  if (!tr) return;
+  MUS.current = name; MUS.step = 0;
+  const stepMs = 60000 / tr.bpm / 2;   // 8ths
+  MUS.timer = setInterval(() => {
+    if (AU.vol <= 0) return;
+    const i = MUS.step % 16;
+    const juke = tr.juke;
+    mvoice(nf(tr.bass[i]), stepMs / 1000 * 1.8, tr.bassType, juke ? 0.5 : 0.32);
+    mvoice(nf(tr.lead[i]), stepMs / 1000 * (juke ? 1.2 : 2.2), tr.leadType, juke ? 0.22 : 0.16);
+    if (juke && i % 4 === 2) mvoice(2400 + (i % 8) * 60, 0.03, 'square', 0.05);  // brush tick
+    MUS.step++;
+    if (MUS.jukeboxUntil && Date.now() > MUS.jukeboxUntil) startSeasonMusic();
+  }, stepMs);
+}
+function stopMusic() {
+  clearInterval(MUS.timer);
+  MUS.timer = null; MUS.current = null;
+}
+function startSeasonMusic() {
+  MUS.jukeboxUntil = 0;
+  playTrack(seasonOf(G.day).toLowerCase());
+}
+function playJukebox(id) {
+  MUS.jukeboxUntil = Date.now() + 40000;   // one "spin", then back to the season
+  sfx('coin');
+  playTrack(id);
 }
 /* ================================= UI ==================================== */
 // DOM builders — all dynamic text goes through textContent (no innerHTML).
@@ -3015,6 +3808,14 @@ function renderLedgerTab(body) {
   const bestDay = Object.keys(byDay).sort((a, b) => byDay[b] - byDay[a])[0];
   if (bestDay !== undefined) body.appendChild(el('div', null, 'Best day: ' + dayName(+bestDay) + ' (+$' + byDay[bestDay] + ')'));
   if (biggestCost) body.appendChild(el('div', null, 'Biggest cost: ' + (biggestCost.note || biggestCost.enterprise) + ' (−$' + (-biggestCost.amount) + ')'));
+  // forecast strip (arc stage 3): projected 6-day income
+  if (G.flags.forecastUnlocked && typeof computeForecast === 'function') {
+    const fc = computeForecast();
+    const strip = el('div');
+    strip.style.cssText = 'border:2px solid var(--green);border-radius:8px;padding:6px 10px;margin:8px 0;color:var(--green);font-weight:bold';
+    strip.textContent = 'Next 6 days, projected: ~$' + fc.total + (fc.parts.length ? '  (' + fc.parts.join(' · ') + ')' : '');
+    body.appendChild(strip);
+  }
   body.appendChild(el('br'));
   addTable('All time', G.ledger.entries);
   // outstanding
@@ -3271,6 +4072,7 @@ function inputVector() {
 }
 function pressAct() {
   if (G.mode === 'title') return;
+  if (typeof FISHING !== 'undefined' && FISHING.state !== 'idle') { fishingAct(); return; }
   if (CH.open) { pickChoice(CH.sel); return; }
   if (DLG.active) { advanceDialogue(); return; }
   if (SHOP.open) { buyShopItem(); return; }
@@ -3569,7 +4371,21 @@ const STORY = {
     spawnForage();
     updateHUD();
     applyGrade();
-    if (R.glyphs.general) R.glyphs.general.visible = !!G.network.connected.general;
+    for (const gid in R.glyphs) R.glyphs[gid].visible = !!G.network.connected[gid];
+    if (G.network.connected.forge) addForgeAwning();
+    startSeasonMusic();
+    if (G.flags.pendingYearReview) {
+      G.flags.pendingYearReview = false;
+      STORY.showYearReview();
+      return;
+    }
+    // stage-4 herald: the barn grant letter, first summer morning of Y2+
+    if (yearOf(day) >= 2 && seasonOf(day) === 'Summer' && (G.network.stage || 0) >= 3 &&
+        !G.flags.chainDone && !G.flags.chainMailed) {
+      G.flags.chainMailed = true;
+      G.mail.push({ day, from: 'Greta', title: 'The barn grant CLEARED',
+        body: 'Two years of asking and one season of clean books — the grant came through. Corwin starts the barn this week, and everyone he owes gets paid the day he’s paid, which is TODAY. Come watch money move like weather. — G.', read: false });
+    }
     switch (day) {
       case 6: break;                              // handled by startNewGame intro
       case 7:
@@ -3653,6 +4469,13 @@ const STORY = {
   tick() {
     const day = G.day, p = player();
     if (!p || G.mode !== 'play' || G.uiOpen) return;
+    ARC.tick();
+    // seasonal festivals, mid-season day 2 (the prologue's fair day is authored)
+    if (day > 11 && dayOfSeason(day) === 2 && !G.dayFlags.festivalDone) {
+      const season = seasonOf(day);
+      const startAt = season === 'Summer' ? 20 : season === 'Winter' ? 18 : 12;
+      if (G.hour >= startAt) { runFestival(season); return; }
+    }
     // Fair auto-start at noon, day 7
     if (day === 7 && G.hour >= 12 && !G.flags.fairDone) {
       G.flags.fairDone = true;
@@ -3824,6 +4647,7 @@ const STORY = {
       ] },
       { fn: () => {
         G.network.connected.general = true;
+        G.network.stage = 2;
         if (R.glyphs.general) R.glyphs.general.visible = true;
         sfx('chime');
         STORY.heart('bramm', 2);
@@ -3914,10 +4738,11 @@ const STORY = {
 
   showYearReview() {
     G.mode = 'scene';
+    const reviewYear = yearOf(Math.max(0, G.day - 1));
     const card = $('yearCard');
     clearEl(card);
     card.style.display = 'block';
-    card.appendChild(el('h2', null, 'Year 1 — ' + G.farmName));
+    card.appendChild(el('h2', null, 'Year ' + reviewYear + ' — ' + G.farmName));
     const body = el('div');
     body.id = 'yearBody';
     const by = {};
@@ -3934,20 +4759,31 @@ const STORY = {
     const highlights = G.journal.slice(-6).map(e => e.lines[0]).filter(Boolean);
     for (const h of highlights) body.appendChild(el('div', null, '  · ' + h));
     card.appendChild(body);
+    // customers strip (standing orders held)
+    const customers = Object.keys(G.contracts || {});
+    if (customers.length) {
+      card.appendChild(el('b', null, 'Your customers: ' + customers.map(id => CAST[id].name).join(' · ')));
+      card.appendChild(el('br'));
+    }
     const btnJ = el('button', 'uiBtn', 'Export journal (.txt)');
     btnJ.onclick = exportJournal;
     card.appendChild(btnJ);
-    const btn = el('button', 'uiBtn', 'Begin Year 2 — your first spring');
+    const firstYear = reviewYear === 1;
+    const btn = el('button', 'uiBtn', firstYear ? 'Begin Year 2 — your first spring' : 'Begin Year ' + (reviewYear + 1));
     btn.onclick = () => {
       card.style.display = 'none';
       G.flags.year2Started = true;
       fadeOut(() => {
-        say(['YEAR 2 — SPRING.',
-          'The longest days you’ve had. A field you cleared yourself. And at Bramm’s, seed money that settles the same day you earn it.',
-          'The tutorial is over. The farm is yours.'], () => {
-          setObjective('Spring! Buy seeds at Bramm’s — your money settles same-day now');
-          G.mode = 'play';
-        });
+        if (firstYear) {
+          say(['YEAR 2 — SPRING.',
+            'The longest days you’ve had. A field you cleared yourself. And at Bramm’s, seed money that settles the same day you earn it.',
+            'The tutorial is over. The farm is yours.'], () => {
+            setObjective('Spring! Buy seeds at Bramm’s — your money settles same-day now');
+            G.mode = 'play';
+          });
+        } else {
+          say(['YEAR ' + (reviewYear + 1) + ' — SPRING. The valley turns over another page.'], () => { G.mode = 'play'; });
+        }
         fadeIn();
       });
     };
@@ -3961,11 +4797,20 @@ const STORY = {
   enterDoor(door) {
     const W = G.world;
     if (door.id === 'farmhouse') {
-      if (G.hour >= CONFIG.SLEEP_FROM) {
-        showChoice(['Sleep until morning', 'Not yet'], i => { if (i === 0) doSleep(); });
-      } else {
+      const opts = [];
+      const canSleep = G.hour >= CONFIG.SLEEP_FROM;
+      if (canSleep) opts.push('Sleep until morning');
+      if (G.upgrades && G.upgrades.kitchen) opts.push('Cook something');
+      opts.push('Not yet');
+      if (opts.length === 1) {
         say(['Too early to turn in — the light’s still worth something. (You can sleep from 18:00.)']);
+        return;
       }
+      showChoice(opts, i => {
+        const pick = opts[i];
+        if (pick === 'Sleep until morning') doSleep();
+        else if (pick === 'Cook something') cookMenu();
+      });
       return;
     }
     const rest = isRestday(G.day);
@@ -3981,11 +4826,50 @@ const STORY = {
       STORY.openGeneral();
       return;
     }
-    if (rest) { say(['Shut for the Restday. The whole street is.']); return; }
-    if (!open && door.id !== 'tavern') { say(['Closed for the day.']); return; }
-    if (door.id === 'tavern') say([{ who: 'maren', text: 'Bluebird’s open! Well — the door is. The kitchen argues. What’s the news from the farm?' }]);
-    else if (door.id === 'forge') STORY.openForge();
-    else if (door.id === 'carpenter') say([{ who: 'corwin', text: 'Corwin! Carpentry! You’ve got a fine porch and I’ve got ideas about it. Come back when you’ve got lumber money.' }]);
+    if (door.id === 'ranch') { if (rest) { say(['The ranch gate is latched for the Restday. Somewhere beyond it, a goose disapproves of you.']); return; } STORY.openRanch(); return; }
+    // the tavern keeps its own hours: Restday evenings it's the fullest room in the valley (§5)
+    if (door.id === 'tavern' && rest) {
+      if (G.hour < 17) { say(['The Bluebird opens at dusk on Restdays — and then the whole valley shows up at once.']); return; }
+    } else if (rest) { say(['Shut for the Restday. The whole street is.']); return; }
+    else if (!open && door.id !== 'tavern') { say(['Closed for the day.']); return; }
+    if (door.id === 'tavern') {
+      // Stage 3b: Maren connects (Y2 spring, after Hetta)
+      if (yearOf(G.day) >= 2 && G.network.connected.forge && !G.network.connected.tavern) {
+        ARC.runMarenConnect();
+        return;
+      }
+      const juke = JUKEBOX.filter(j => !(j.retiresAtStage && (G.network.stage || 0) >= j.retiresAtStage));
+      showChoice(['Talk to Maren', ...juke.map(j => '♪ ' + j.title), 'Leave'], i => {
+        if (i === 0) say([{ who: 'maren', text: 'Bluebird’s open! Well — the door is. The kitchen argues. What’s the news from the farm?' }]);
+        else if (i <= juke.length) { playJukebox(juke[i - 1].id); toast('♪ ' + juke[i - 1].title); }
+      });
+    }
+    else if (door.id === 'forge') {
+      // Stage 3a: Hetta connects (Y2 spring, estimates → invoices)
+      if (yearOf(G.day) >= 2 && G.network.connected.general && !G.network.connected.forge) {
+        ARC.runHettaConnect(() => STORY.openForge());
+        return;
+      }
+      STORY.openForge();
+    }
+    else if (door.id === 'carpenter') {
+      G.upgrades = G.upgrades || {};
+      const builds = [];
+      if (!G.upgrades.kitchen) builds.push({ key: 'kitchen', label: 'Build a kitchen — $250', price: 250,
+        done: 'A kitchen! Two burners, one window over the sink, ideas about shelves! Done by tonight — I already had the measurements. Don’t ask how!' });
+      else if (!G.upgrades.porch) builds.push({ key: 'porch', label: 'Build the porch — $200', price: 200,
+        done: 'THE porch! Evening-facing, rail wide enough to lean a mug on. Your grandfather-house deserves this. DONE.' });
+      if (!builds.length) { say([{ who: 'corwin', text: 'Kitchen: built! Porch: built! Next dream on the list is a barn, and that one starts at Greta’s gate, not mine!' }]); return; }
+      showChoice([builds[0].label, 'Just saying hello'], i => {
+        if (i !== 0) { say([{ who: 'corwin', text: 'Hello back! The offer stands — good bones deserve rooms!' }]); return; }
+        if (!spend(builds[0].price, 'Upgrades', builds[0].key)) { toast('Not enough cash on hand.'); return; }
+        G.upgrades[builds[0].key] = true;
+        sfx('coin');
+        say([{ who: 'corwin', text: builds[0].done, mood: 'happy' }], () => {
+          jline('Corwin built the ' + builds[0].key + '. He hummed the whole time and signed a beam somewhere he thinks I won’t find.');
+        });
+      });
+    }
     else if (door.id === 'clinic') say([{ who: 'isolde', text: 'Oh — hello. You look… well, you look like farming. Rest when you’re tired. People forget that’s medical advice.' }]);
     else say(['The door is friendly but firm: this is somebody’s home.']);
   },
@@ -4009,8 +4893,22 @@ const STORY = {
           jline('Left the ' + t + ' at the forge. Two days of working around its absence. Hetta looked delighted. The ' + t + ' looked resigned.');
         } });
     }
+    if (yearOf(G.day) >= 2 && G.network.connected.forge) {
+      ITEMS.sprinkler = ITEMS.sprinkler || { name: 'Iron Sprinkler', icon: '🚿', sell: 0 };
+      items.push({ icon: '🚿', name: 'Iron Sprinkler', price: 90, give: 'sprinkler',
+        desc: 'Set on tilled ground; waters its four neighbours each morning.' });
+    }
     if (!items.length) { say([{ who: 'hetta', text: 'Everything you own is already copper. Iron’s a conversation for after you’ve worn the copper in.' }]); return; }
-    openShop("Hetta's Forge & Supply", items, 'estimates chalked on the wall');
+    openShop("Hetta's Forge & Supply", items,
+      G.network.connected.forge ? '✳ invoices, settled on completion' : 'estimates chalked on the wall');
+  },
+
+  openRanch() {
+    ITEMS.egg = ITEMS.egg || { name: 'Egg', icon: '🥚', sell: 8, enterprise: 'Eggs' };
+    const items = [
+      { icon: '🥚', name: 'Fresh Eggs ×4', price: 26, give: 'egg', count: 4, desc: 'From the good layers. (Your own coop: someday.)' }
+    ];
+    openShop("Greta's Ranch", items, 'the goose supervises all transactions');
   },
 
   // last season's per-crop earnings, shown as profit chips once the Ledger exists
@@ -4052,6 +4950,18 @@ const STORY = {
           addItem('coat', 1);
           say([{ who: 'bramm', text: 'Good coat. Should’ve had it two days ago, but that wasn’t your fault, was it.' }]);
         } });
+    }
+    if (!G.inventory.rod && !G.flags.rodBought) {
+      ITEMS.rod = ITEMS.rod || { name: 'Bamboo Rod', icon: '🎣', sell: 0 };
+      items.push({ icon: '🎣', name: 'Bamboo Rod', price: 40, desc: 'Cast at any water edge. The river is honest.',
+        onBuy: () => { G.flags.rodBought = true; addItem('rod', 1); } });
+    }
+    const cap = backpackCap();
+    if (cap < 36) {
+      const next = cap === 12 ? 24 : 36;
+      items.push({ icon: '🎒', name: 'Backpack (' + next + ' kinds)', price: CONFIG.BACKPACK_PRICES[next],
+        desc: 'Room for a more complicated life.',
+        onBuy: () => { G.backpack = next; toast('Backpack upgraded — ' + next + ' kinds of things now fit in your life.'); } });
     }
     if (!items.length) items.push({ icon: '🫙', name: 'Preserving Jar', price: 12, give: 'walnut', desc: 'For a quieter month. (Seeds return in spring.)' });
     const note = G.network.connected.general ? '✳ settles instantly' : 'cash only, checks by mail';
