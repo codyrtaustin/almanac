@@ -49,6 +49,25 @@
     bite, or a rested morning, drawn from the calendar stream; the Journal only
     ever "notices."
   - Debug hooks exposed on window.ALMANAC for acceptance testing (harmless in play).
+  V2 — HM64 MECHANICS TUNING (from a decomp *mechanics* study; numbers used as
+  ratios only — no code, text, art, or audio from the game or repo):
+  - Weather: per-season weighted tables (85/15, summer 85/10/5 storm, winter
+    70/30 snow); wet days get one cool multiply (#B0B0C0); a marker offering
+    quietly turns tomorrow's storm to rain; day-after-storm lines for all 12.
+  - Affection: hidden points, 13 per displayed heart, cap 130; first talk each
+    day +1, loved gift +3 / liked +1 / disliked −2, birthdays ×5; repeat talks
+    branch to terse lines; cross-NPC gossip leaks the arcs.
+  - Dialogue: the priority-ladder order (situation bits → Restday → affection
+    tier → weather override → random variants).
+  - Crops: dryness pauses growth (only never-watered seedlings die); the season
+    rollover reaps out-of-season crops into visible corpses, reverts unsprouted
+    seeds, and spring reclaims half the untended tilled rows; HM64 sell ratios
+    re-denominated (turnip 6 … strawberry 15; forage ≈ half the worst crop).
+  - Stamina: fatigue counter with rest-only recovery (sleep, the swimming
+    hole); one-time tier-crossing tells; upgraded hoe/can cost MORE per swing
+    but work a row of three; raw food small, cooked food good, dishes storable.
+  - Night mostly *sounds* like night: the overworld loop stops after dark.
+  - Year review adds "the valley's regard" (hearts + worked tiles + upgrades).
 -->
 <style>
   :root {
@@ -294,21 +313,21 @@ const CONFIG = {
 
   CROPS: {
     turnip:    { name: 'Turnip',     icon: '🥕', seasons: ['Autumn', 'Spring'], days: 2, seed: 20, sell: 6,  color: 0xE8E4EC, packet: 6 },
-    carrot:    { name: 'Carrot',     icon: '🥕', seasons: ['Autumn'],           days: 3, seed: 25, sell: 11, color: 0xD98A4B, packet: 6 },
-    bokchoy:   { name: 'Bok Choy',   icon: '🥬', seasons: ['Autumn'],           days: 2, seed: 22, sell: 8,  color: 0x9CBF8A, packet: 6 },
-    potato:    { name: 'Potato',     icon: '🥔', seasons: ['Spring'],           days: 3, seed: 24, sell: 12, color: 0xC9A876, packet: 6 },
-    cucumber:  { name: 'Cucumber',   icon: '🥒', seasons: ['Spring'],           days: 2, seed: 22, sell: 8,  color: 0x6F9E5A, packet: 6 },
-    strawberry:{ name: 'Strawberry', icon: '🍓', seasons: ['Spring'],           days: 3, seed: 30, sell: 14, color: 0xC65B5B, packet: 6 }
+    carrot:    { name: 'Carrot',     icon: '🥕', seasons: ['Autumn'],           days: 3, seed: 25, sell: 8, color: 0xD98A4B, packet: 6 },
+    bokchoy:   { name: 'Bok Choy',   icon: '🥬', seasons: ['Autumn'],           days: 2, seed: 22, sell: 7,  color: 0x9CBF8A, packet: 6 },
+    potato:    { name: 'Potato',     icon: '🥔', seasons: ['Spring'],           days: 3, seed: 24, sell: 8, color: 0xC9A876, packet: 6 },
+    cucumber:  { name: 'Cucumber',   icon: '🥒', seasons: ['Spring'],           days: 2, seed: 22, sell: 7,  color: 0x6F9E5A, packet: 6 },
+    strawberry:{ name: 'Strawberry', icon: '🍓', seasons: ['Spring'],           days: 3, seed: 30, sell: 15, color: 0xC65B5B, packet: 6 }
   },
   FORAGE: {
-    Autumn: [ { id: 'mushroom', name: 'Mushroom',   icon: '🍄', sell: 7 },
-              { id: 'walnut',   name: 'Walnut',     icon: '🌰', sell: 5 },
-              { id: 'berries',  name: 'Wild Berries', icon: '🫐', sell: 6 } ],
-    Winter: [ { id: 'wintergreen', name: 'Wintergreen', icon: '🌿', sell: 10 },
-              { id: 'pinecone',    name: 'Pine Cone',   icon: '🌲', sell: 5 } ],
-    Spring: [ { id: 'daffodil', name: 'Daffodil',  icon: '🌼', sell: 8 },
-              { id: 'wildleek', name: 'Wild Leek', icon: '🧅', sell: 9 } ],
-    Summer: [ { id: 'honeycomb', name: 'Honeycomb', icon: '🍯', sell: 12 } ]
+    Autumn: [ { id: 'mushroom', name: 'Mushroom',   icon: '🍄', sell: 5 },
+              { id: 'walnut',   name: 'Walnut',     icon: '🌰', sell: 4 },
+              { id: 'berries',  name: 'Wild Berries', icon: '🫐', sell: 5 } ],
+    Winter: [ { id: 'wintergreen', name: 'Wintergreen', icon: '🌿', sell: 6 },
+              { id: 'pinecone',    name: 'Pine Cone',   icon: '🌲', sell: 3 } ],
+    Spring: [ { id: 'daffodil', name: 'Daffodil',  icon: '🌼', sell: 4 },
+              { id: 'wildleek', name: 'Wild Leek', icon: '🧅', sell: 5 } ],
+    Summer: [ { id: 'honeycomb', name: 'Honeycomb', icon: '🍯', sell: 7 } ]
   },
   FORAGE_PER_DAY: 5,
 
@@ -389,6 +408,7 @@ const G = {
   weather: 'sun',
   money: CONFIG.START_MONEY,
   stamina: CONFIG.STAMINA_MAX,
+  fatigue: 0,
   collapsedYesterday: false,
   inventory: {},           // itemId -> count
   heldItem: null,          // itemId or tool id
@@ -627,19 +647,22 @@ function tileAt(wx, wz) {
   return { t: W.tiles[tz * f.w + tx], tx, tz, idx: tz * f.w + tx };
 }
 
+// Per-season weighted tables (HM64 ratios): spring/autumn 85 sun / 15 rain,
+// summer 85 sun / 10 rain / 5 storm, winter 70 sun / 30 snow.
 function getWeather(dayIndex) {
   const season = seasonOf(dayIndex);
-  const r = calendarDay(dayIndex).r();
-  if (season === 'Winter') return r < 0.45 ? 'snow' : 'sun';
-  if (season === 'Autumn') return r < 0.25 ? 'rain' : (r < 0.45 ? 'cloud' : 'sun');
-  if (season === 'Spring') return r < 0.3 ? 'rain' : 'sun';
-  return r < 0.15 ? 'rain' : 'sun';
+  const r = calendarDay(dayIndex).r() * 100;
+  if (season === 'Winter') return r < 30 ? 'snow' : 'sun';
+  if (season === 'Summer') return r < 5 ? 'storm' : r < 15 ? 'rain' : 'sun';
+  if (season === 'Autumn') return r < 15 ? 'rain' : r < 27 ? 'cloud' : 'sun';
+  return r < 15 ? 'rain' : 'sun';
 }
 // Year 1 is authored: day 2 (fair) and day 6 (Starlight) must be clear.
 function weatherFor(dayIndex) {
   if (dayIndex === 7 || dayIndex === 11) return seasonOf(dayIndex) === 'Winter' ? 'sun' : 'cloud';
   return getWeather(dayIndex);
 }
+const WET = w => w === 'rain' || w === 'storm';
 
 function forageForDay(dayIndex) {
   const season = seasonOf(dayIndex);
@@ -1295,7 +1318,7 @@ function spawnForage() {
     jline('The woods were strangely generous today. I have a guess why, and I’m not writing it down.');
   }
   // rain brings worms up along the paths (Ness’s trade)
-  if (G.weather === 'rain' && typeof CONTRACT_DEFS !== 'undefined') {
+  if (WET(G.weather) && typeof CONTRACT_DEFS !== 'undefined') {
     ITEMS.worm = ITEMS.worm || { name: 'Bait Worm', icon: '🪱', sell: 3, enterprise: 'Fishing' };
     const cal = calendarDay(G.day ^ 0x3AB).r;
     for (let i = 0; i < 3; i++) {
@@ -1335,13 +1358,14 @@ function buildParticles(parent) {
 function tickParticles(dt) {
   const p = R.particles;
   if (!p) return;
-  const raining = G.weather === 'rain', snowing = G.weather === 'snow';
+  const raining = WET(G.weather), snowing = G.weather === 'snow';
+  const storming = G.weather === 'storm';
   p.visible = raining || snowing;
   if (!p.visible) return;
-  p.material.size = snowing ? 0.18 : 0.1;
+  p.material.size = snowing ? 0.18 : storming ? 0.13 : 0.1;
   p.material.color.set(snowing ? 0xf4f6f4 : 0xaCc4d4);
   const arr = p.geometry.attributes.position.array;
-  const fall = snowing ? 2.2 : 16;
+  const fall = snowing ? 2.2 : storming ? 26 : 16;
   for (let i = 0; i < arr.length; i += 3) {
     arr[i + 1] -= fall * dt;
     if (snowing) arr[i] += Math.sin((arr[i + 1] + i) * 0.8) * dt * 0.6;
@@ -1365,9 +1389,14 @@ function applyGrade() {
   if (G.hour >= night) phase = 'night';
   else if (G.hour >= dusk) phase = 'evening';
   if (phase === 'day') {
-    soft.style.opacity = 0; mult.style.opacity = 0;
+    soft.style.opacity = 0;
+    if (WET(G.weather) || G.weather === 'snow') {
+      // one cool multiply, nothing fancier — HM64's storm-light (§2)
+      mult.style.background = '#B0B0C0';
+      mult.style.opacity = G.weather === 'storm' ? 0.5 : 0.35;
+    } else mult.style.opacity = 0;
     R.ambient.intensity = 0.78;
-    R.scene.background.set(G.weather === 'rain' || G.weather === 'cloud' ? '#A8BCC4' : P.sky);
+    R.scene.background.set(WET(G.weather) || G.weather === 'cloud' ? '#A8BCC4' : P.sky);
   } else if (phase === 'evening') {
     soft.style.background = '#E8A87C'; soft.style.opacity = 0.5;
     mult.style.background = '#e0c0b0'; mult.style.opacity = 0.25;
@@ -1380,6 +1409,12 @@ function applyGrade() {
     R.scene.background.set(P.skyNight);
   }
   R.scene.fog.color.copy(R.scene.background);
+  // NIGHTTIME mostly *sounds* like night (§1): the overworld loop stops
+  if (typeof MUS !== 'undefined' && !MUS.jukeboxUntil) {
+    const seasonLoop = MUS.current && !TRACKS[MUS.current].juke;
+    if (phase === 'night' && seasonLoop) stopMusic();
+    else if (phase !== 'night' && !MUS.current && G.mode === 'play') startSeasonMusic();
+  }
   // windows go emissive by texture swap at dusk
   const lit = phase !== 'day';
   for (const w of R.windowMeshes) {
@@ -1610,6 +1645,11 @@ function findAction() {
   }
   // the ridge marker's offering ledge
   if (dist2(p.x, p.z, W.marker.x, W.marker.z) < 7) return { type: 'marker' };
+  // the swimming hole: rest for the deep tiredness (fatigue, §3)
+  if (G.heldItem !== 'rod' &&
+      dist2(p.x, p.z, W.pool.x, W.pool.z) < (W.pool.r + 1.2) * (W.pool.r + 1.2)) {
+    return { type: 'swim' };
+  }
   // bin / mailbox / doors
   if (dist2(p.x, p.z, W.bin.x, W.bin.z) < 4.4) return { type: 'bin' };
   if (dist2(p.x, p.z, W.mailbox.x, W.mailbox.z) < 3.2) return { type: 'mail' };
@@ -1961,6 +2001,9 @@ function buildItems() {
     }
   }
   ITEMS.coat = { name: 'Winter Coat', icon: '🧥', sell: 0, enterprise: 'Supplies' };
+  ITEMS.scarf = { name: 'Knit Scarf', icon: '🧣', sell: 0, enterprise: 'Supplies' };
+  ITEMS.worm = { name: 'Bait Worm', icon: '🪱', sell: 3, enterprise: 'Fishing' };
+  ITEMS.egg = { name: 'Egg', icon: '🥚', sell: 5, enterprise: 'Eggs' };
 }
 function addItem(id, n) {
   if (!(id in G.inventory) && typeof backpackCap === 'function' &&
@@ -2034,14 +2077,59 @@ function tickTime(dt) {
 }
 
 function staminaFloor() { return G.day < 12 ? CONFIG.STAMINA_Y1_FLOOR : 0; }
+// Two hidden meters (§3): stamina (short-term) and fatigue (long-term wear).
+// Crossing a stamina tier interrupts ONCE with a diegetic tell, then lets you work.
+const STAMINA_TIERS = [75, 50, 25, 10];
+const TIER_TELLS = [
+  'You wipe your brow on your sleeve.',
+  'Your shoulders have opinions now.',
+  'You lean on the handle a moment. The field tilts, politely.',
+  'The next swing takes everything you can find.'
+];
 function spendStamina(n) {
+  if ((G.fatigue || 0) >= 75) n += 1;                 // worn down: everything costs more
+  const before = G.stamina;
   G.stamina = Math.max(staminaFloor(), G.stamina - n);
+  G.fatigue = clamp((G.fatigue || 0) + n * 0.5, 0, 100);
+  for (let i = 0; i < STAMINA_TIERS.length; i++) {
+    const tier = STAMINA_TIERS[i];
+    if (before > tier && G.stamina <= tier && G.flags.staminaTier !== i) {
+      G.flags.staminaTier = i;
+      toast(TIER_TELLS[i], 2600);
+      const p = player();
+      if (p) p.hopT = 0.18;
+      break;
+    }
+  }
 }
 function staminaWord() {
-  if (G.stamina > 75) return 'Rested';
-  if (G.stamina > 50) return 'Fine';
-  if (G.stamina > 25) return 'Tired';
-  return 'Exhausted';
+  let w;
+  if (G.stamina > 75) w = 'Rested';
+  else if (G.stamina > 50) w = 'Fine';
+  else if (G.stamina > 25) w = 'Tired';
+  else w = 'Exhausted';
+  if ((G.fatigue || 0) >= 75) w += ' · Worn down';
+  return w;
+}
+// Food restores stamina; only rest touches fatigue (§3).
+function foodValue(id) {
+  const it = ITEMS[id];
+  if (!it) return 0;
+  if (it.food) return it.food;                        // cooked dishes carry their own value
+  if (it.enterprise === 'Fishing' && it.sell) return 14;
+  if (CONFIG.CROPS[id]) return 8 + Math.min(4, Math.floor(it.sell / 4));
+  if (it.enterprise === 'Foraging') return 5;
+  if (id === 'egg') return 6;
+  return 0;
+}
+function eatHeld(id) {
+  const v = foodValue(id);
+  if (!v) { toast('Not the eating kind.'); return; }
+  if (!takeItem(id, 1)) return;
+  G.stamina = Math.min(CONFIG.STAMINA_MAX + (G.maxStaminaBonus || 0), G.stamina + v);
+  G.flags.staminaTier = -1;
+  sfx('pick');
+  toast('Ate the ' + ITEMS[id].name.toLowerCase() + '. (+' + v + ')');
 }
 
 function jline(line) { (G.dayFlags.journal = G.dayFlags.journal || []).push(line); }
@@ -2083,23 +2171,43 @@ function rollover(newDay) {
       body: 'Your ' + c.label.toLowerCase() + ' for $' + c.amount + ' has cleared. Thank you for your patience.', read: false });
     G.flags.lastCheckAmount = c.amount;
   }
-  // 3. crop growth (watering streak feeds the fair pumpkin's size roll)
+  // 3. crop growth (watering streak feeds the fair pumpkin's size roll).
+  // HM64-soft death: dryness pauses growth; only seedlings that have NEVER
+  // been watered die of neglect (§6 of the tuning appendix).
   for (const t of G.world.tiles) {
     if (!t.crop || t.dead) continue;
     const c = CONFIG.CROPS[t.crop];
-    if (t.watered) { t.grown = Math.min(c.days, t.grown + 1); t.dry = 0; t.streak = (t.streak || 0) + 1; }
-    else {
+    if (t.watered) {
+      t.grown = Math.min(c.days, t.grown + 1);
+      t.dry = 0; t.everWatered = true; t.streak = (t.streak || 0) + 1;
+    } else {
       t.streak = 0;
       if (t.grown < c.days) {
         t.dry++;
-        if (t.dry >= 2) { t.dead = true; G.dayFlags.cropDied = true; }
+        if (!t.everWatered && t.dry >= 2) { t.dead = true; G.dayFlags.cropDied = true; }
       }
     }
   }
-  // 4. watered flags clear (unless rain); sprinklers water their neighbours
-  const newWeather = weatherFor(newDay);
+  // storm aftermath: a typhoon flattens a share of the standing crops (§2)
+  if (G.weather === 'storm') {
+    const cal = calendarDay(prevDay ^ 0x570F).r;
+    let lost = 0;
+    for (const t of G.world.tiles) {
+      if (t.crop && !t.dead && t.grown > 0 && cal() < 0.15) { t.dead = true; lost++; }
+    }
+    G.flags.stormYesterday = true;
+    if (lost) jline('The storm took ' + lost + ' plants overnight — flattened flat, like the sky stepped on them. The rest look embarrassed to be standing.');
+    else jline('The storm blew through and somehow took nothing but sleep. The valley will talk of little else today.');
+  } else {
+    G.flags.stormYesterday = false;
+  }
+  // 4. watered flags clear (unless rain/storm); sprinklers water their neighbours
+  let newWeather = weatherFor(newDay);
+  // an offering at the marker turns tomorrow's storm aside — never announced (§13)
+  if (newWeather === 'storm' && G.dayFlags.offered) newWeather = 'rain';
   for (const t of G.world.tiles) {
-    t.watered = newWeather === 'rain';
+    t.watered = WET(newWeather);
+    if (t.watered) t.everWatered = true;
   }
   const f0 = G.world.field;
   G.world.tiles.forEach((t, i) => {
@@ -2135,9 +2243,35 @@ function rollover(newDay) {
   if (typeof layEggs === 'function') layEggs();
   if (typeof LIFE !== 'undefined') LIFE.applyBlessing(newDay);
   const seasonChanged = seasonOf(newDay) !== seasonOf(prevDay);
+  // season rollover is a reaper (§6): out-of-season crops become visible dead
+  // tiles, unsprouted seeds revert to tilled soil, and each new year the wild
+  // slowly reclaims untended work.
+  if (seasonChanged) {
+    const newSeason = seasonOf(newDay);
+    let reaped = 0, reverted = 0;
+    for (const t of G.world.tiles) {
+      if (t.crop && !CONFIG.CROPS[t.crop].seasons.includes(newSeason)) {
+        if (t.grown === 0) { t.crop = null; t.streak = 0; reverted++; }
+        else if (!t.dead) { t.dead = true; reaped++; }
+      }
+    }
+    if (reaped) jline('The season turned overnight and took the out-of-season plantings with it — ' + reaped + ' withered where they stood. The field keeps its receipts.');
+    if (newSeason === 'Spring') {
+      const cal = calendarDay(newDay ^ 0x5EED).r;
+      let wilded = 0;
+      for (const t of G.world.tiles) {
+        if (t.s === 'till' && !t.crop && !t.obj && cal() < 0.5) { t.s = 'clear'; wilded++; }
+        else if (t.s === 'clear' && !t.obj && cal() < 0.18) { t.obj = 'weed'; t.s = 'wild'; wilded++; }
+      }
+      if (wilded) jline('Spring found every row I tilled and never planted, and quietly took some back. Fair enough. The land was only ever lending it.');
+    }
+  }
   G.day = newDay;
   G.hour = CONFIG.DAY_START;
   G.stamina = (G.collapsedYesterday ? 62 : 100) + (G.maxStaminaBonus || 0);
+  // sleep is rest: fatigue eases (less so after a collapse)
+  G.fatigue = clamp((G.fatigue || 0) - (G.collapsedYesterday ? 15 : 40), 0, 100);
+  G.flags.staminaTier = -1;
   G.collapsedYesterday = false;
   if (seasonChanged) { paintGround(seasonOf(newDay)); }
   TL.dirty = true;
@@ -2208,15 +2342,60 @@ function performAction() {
     case 'bin': shipHeld(); break;
     case 'mail': openMail(); break;
     case 'marker': if (typeof LIFE !== 'undefined') LIFE.tryOffering(); break;
+    case 'swim': {
+      const season = seasonOf(G.day);
+      if (season === 'Winter') { say(['The swimming hole has iced its edges. It is not an invitation.']); break; }
+      showChoice(['Take a dip (an hour)', 'Not now'], i => {
+        if (i !== 0) return;
+        G.hour = Math.min(CONFIG.DAY_END - 0.1, G.hour + 1);
+        G.fatigue = clamp((G.fatigue || 0) - 25, 0, 100);
+        G.flags.staminaTier = -1;
+        sfx('plink');
+        toast('The cold water takes the week right out of your shoulders.');
+        if (!G.dayFlags.swam) { G.dayFlags.swam = true; jline('Swam at the river bend. The kind of tired that food doesn’t fix, fixed.'); }
+        updateHUD();
+      });
+      break;
+    }
     case 'door': STORY.enterDoor(act.door); break;
     case 'tile': doTileAction(act.tt); break;
   }
 }
 function hop() { const p = player(); p.hopT = 0.18; }
 
+// HM64 rule (§3): upgraded tools cost MORE per swing because they do more
+// tiles of work — copper hoe/can act on a row of three.
 function toolCost(tool) {
   const tier = (G.toolTiers || {})[tool] || 0;
+  if (tool === 'hoe' || tool === 'can') return CONFIG.STAMINA_COST[tool] + tier;
   return Math.max(1, CONFIG.STAMINA_COST[tool] - tier);
+}
+function rowTiles(tt) {
+  // target tile plus the two beyond it along the facing direction
+  const fv = facingVector();
+  const dx = Math.round(fv.x), dz = Math.round(fv.z);
+  const f = G.world.field;
+  const out = [tt];
+  for (let i = 1; i <= 2; i++) {
+    const tx = tt.tx + dx * i, tz = tt.tz + dz * i;
+    if (tx < 0 || tx >= f.w || tz < 0 || tz >= f.h) break;
+    out.push({ t: G.world.tiles[tz * f.w + tx], tx, tz, idx: tz * f.w + tx });
+  }
+  return out;
+}
+function waterTileRow(tt) {
+  const tiles = (G.toolTiers && G.toolTiers.can >= 1) ? rowTiles(tt) : [tt];
+  for (const q of tiles) {
+    if (q.t.s === 'till' || q.t.crop) { q.t.watered = true; q.t.everWatered = true; }
+  }
+  spendStamina(toolCost('can'));
+}
+function tillRow(tt) {
+  const tiles = (G.toolTiers && G.toolTiers.hoe >= 1) ? rowTiles(tt) : [tt];
+  for (const q of tiles) {
+    if (q.t.s === 'clear' && !q.t.obj) q.t.s = 'till';
+  }
+  spendStamina(toolCost('hoe'));
 }
 function toolIsAway(tool) {
   if (G.toolAway && G.toolAway.tool === tool) {
@@ -2249,7 +2428,7 @@ function doTileAction(tt) {
     G.dayFlags.harvested = (G.dayFlags.harvested || 0) + 1;
     if (!G.flags.firstHarvest) { G.flags.firstHarvest = true; jline('First harvest. They’re small and a little lopsided and I grew them.'); }
   }
-  else if (t.crop) { if (toolIsAway('can')) return; t.watered = true; spendStamina(toolCost('can')); hop(); sfx('plink'); }
+  else if (t.crop) { if (toolIsAway('can')) return; waterTileRow(tt); hop(); sfx('plink'); }
   else if (t.s === 'till' && held === 'sprinkler' && !t.crop) {
     if (!takeItem('sprinkler', 1)) return;
     t.obj = 'sprinkler';
@@ -2260,13 +2439,13 @@ function doTileAction(tt) {
     const crop = CONFIG.CROPS[heldSeed];
     if (!crop.seasons.includes(seasonOf(G.day))) { toast('Not the season for ' + crop.name.toLowerCase() + '.'); return; }
     if (!takeItem(held, 1)) return;
-    t.crop = heldSeed; t.grown = 0; t.dead = false; t.dry = 0;
-    if (G.weather === 'rain') t.watered = true;
+    t.crop = heldSeed; t.grown = 0; t.dead = false; t.dry = 0; t.everWatered = false;
+    if (WET(G.weather)) { t.watered = true; t.everWatered = true; }
     hop(); sfx('plink');
     if (!G.flags.firstPlant) { G.flags.firstPlant = true; jline('Put the first seeds in the ground. Now we both wait.'); }
   }
-  else if (t.s === 'till') { if (toolIsAway('can')) return; t.watered = true; spendStamina(toolCost('can')); hop(); sfx('plink'); }
-  else if (t.s === 'clear') { if (toolIsAway('hoe')) return; t.s = 'till'; spendStamina(toolCost('hoe')); hop(); sfx('thud'); }
+  else if (t.s === 'till') { if (toolIsAway('can')) return; waterTileRow(tt); hop(); sfx('plink'); }
+  else if (t.s === 'clear') { if (toolIsAway('hoe')) return; tillRow(tt); hop(); sfx('thud'); }
   TL.dirty = true;
   STORY.checkObjectives();
 }
@@ -2303,7 +2482,7 @@ function saveEncode() {
   const tiles = G.world.tiles.map(t =>
     [t.s === 'wild' ? 0 : t.s === 'clear' ? 1 : 2, t.obj || '', t.crop || '', t.grown, t.watered ? 1 : 0, t.dry, t.dead ? 1 : 0].join('.'));
   const data = {
-    v: 1, seed: G.world.seed, day: G.day, hour: Math.min(G.hour, 23),
+    v: 2, seed: G.world.seed, day: G.day, hour: Math.min(G.hour, 23),
     money: G.money, stamina: G.stamina,
     inv: G.inventory, held: G.heldItem, checks: G.pendingChecks,
     shipped: G.todayShipped, mail: G.mail, journal: G.journal,
@@ -2313,13 +2492,13 @@ function saveEncode() {
     toolAway: G.toolAway || null, contracts: G.contracts || {},
     backpack: G.backpack || 12, upgrades: G.upgrades || {},
     romance: G.romance || { step: 0 }, animals: G.animals || { hens: 0 },
-    staminaBonus: G.maxStaminaBonus || 0, tiles
+    staminaBonus: G.maxStaminaBonus || 0, fatigue: G.fatigue || 0, tiles
   };
   return b64encode(JSON.stringify(data));
 }
 function saveDecode(code) {
   const data = JSON.parse(b64decode(code.trim()));
-  if (!data || data.v !== 1) throw new Error('bad save');
+  if (!data || (data.v !== 1 && data.v !== 2)) throw new Error('bad save');
   return data;
 }
 function applySave(data) {
@@ -2340,6 +2519,8 @@ function applySave(data) {
   G.network = data.network || { connected: {} };
   G.farmName = data.farmName; G.playerName = data.playerName; G.look = data.look || G.look;
   G.hearts = data.hearts || {};
+  if (data.v === 1) for (const k in G.hearts) G.hearts[k] = Math.min(130, G.hearts[k] * 13);
+  G.fatigue = data.fatigue || 0;
   G.jobs = data.jobs || []; G.toolTiers = data.toolTiers || {}; G.toolAway = data.toolAway || null;
   G.contracts = data.contracts || {}; G.backpack = data.backpack || 12; G.upgrades = data.upgrades || {};
   G.romance = data.romance || { step: 0 }; G.animals = data.animals || { hens: 0 };
@@ -2371,6 +2552,11 @@ function downloadSave() {
 /* ==================== CAST: social layer (phase 2) ======================= */
 // Gift preferences are trait-consistent and learnable by reasoning (§9).
 // Birthdays: the focus villagers, spread 2 per season off festival days.
+// displayed hearts on the 0-10 wall = points / 13 (HM64's affection/52 ratio,
+// re-denominated for ALMANAC's shorter calendar)
+function displayHearts(id) {
+  return Math.min(10, Math.floor((G.hearts[id] || 0) / 13));
+}
 const SOCIAL = {
   prefs: {
     bramm:  { loved: ['strawberry', 'berries', 'honeycomb'], liked: ['walnut', 'carrot'], disliked: ['wintergreen'] },
@@ -2670,28 +2856,87 @@ const LINES = {
   }
 };
 
+// Day-after-storm lines: the whole town shares one memory for one day (§2, §8).
+const STORM_AFTER = {
+  bramm: 'That wind. Lost two shingles and a sign letter. The B, of course. Hm.',
+  hetta: 'Some storm. The forge chimney sang all night. Badly.',
+  corwin: 'That storm made me a week of roof work! Terrible! Wonderful! Terrible!',
+  isolde: 'Did you sleep through that? (Nobody slept through that.)',
+  rolf: 'Storm flattened my east rows. Every year it picks the east. It knows.',
+  maren: 'Full house last night — nobody wanted to walk home in that. Best storm in years, business-wise.',
+  greta: 'The animals knew by noon yesterday. They always know. I should charge for forecasts.',
+  aldwin: 'Quite a blow. The old marker didn’t move an inch, I checked. It never does.',
+  ness: 'Storm stirred the river up good. Fish’ll bite stupid today.',
+  fen: 'The trail is all branches this morning. I’ll be sweeping till dusk. I don’t mind.',
+  pip: 'DID YOU SEE THE LIGHTNING?! I counted NINE! Ma says it was four! It was NINE!',
+  sable: 'The whole valley got the same haircut last night. The notebook has three pages on it already.'
+};
+// Festival-eve invitations (one-shot situation bit, day before mid-season).
+const FESTIVAL_EVE = {
+  Spring: 'Seed Swap tomorrow at the square. Bring packets, take packets. Argue kindly.',
+  Summer: 'Firefly Night tomorrow, down at the water. Bring nothing. That’s the whole trick of it.',
+  Autumn: 'Fair tomorrow. The judging stand’s already up. Somebody’s nervous, and it isn’t the pumpkins.',
+  Winter: 'Starlight Eve tomorrow. Cold as anything and nobody would miss it.'
+};
+// Cross-NPC leakage (§4): other villagers notice the arcs moving.
+function gossipLine(id) {
+  const g = [];
+  if (G.romance && G.romance.step >= 2 && !G.flags.romancePaired) {
+    if (id === 'maren') g.push('Seen Bramm lately? Whistling. WHISTLING. I say nothing. I am a vault.');
+    if (id === 'greta') g.push('Bramm ordered a two-cup thermos from my catalog. I did not ask. The goose asked. He wouldn’t say.');
+    if (id === 'pip') g.push('Mr. Bramm was at the SHORE again! With the quiet lady! I told nobody except everybody!');
+  }
+  if (G.flags.romancePaired) {
+    if (id === 'aldwin') g.push('The general store stocks poetry now. Two volumes. "For a friend." The valley improves in unexpected aisles.');
+  }
+  if (G.network.stage >= 5) {
+    if (id === 'maren') g.push('Third stool from the window has its farmer back. Rolf, evenings, like the old days. The room’s complete again.');
+    if (id === 'pip') g.push('Rolf bought me a lemonade at the Bluebird. ROLF. At the BLUEBIRD. In the EVENING.');
+  } else if (G.network.stage >= 3) {
+    if (id === 'corwin') g.push('Hetta’s new forge hood went up Tuesday! She stood outside admiring it for an HOUR. I timed it! Lovingly!');
+  }
+  return g.length ? g[Math.floor(rand('live') * g.length)] : null;
+}
+// The HM64 priority ladder (§5): situation bits, then Restday, then affection
+// tier, then weather override, then 3–4 random variants.
 function pickTalkLine(id) {
   const B = LINES[id];
   if (!B) return '…';
   const season = seasonOf(G.day), rest = isRestday(G.day);
-  const hearts = G.hearts[id] || 0;
-  const pool = [];
-  // priority slots
+  const hearts = displayHearts(id);
+  // 3. one-shot situation bits
+  if (G.flags.stormYesterday && STORM_AFTER[id]) return STORM_AFTER[id];
+  if (G.day > 11 && dayOfSeason(G.day) === 1 && rand('live') < 0.5) return FESTIVAL_EVE[season];
+  const gossip = gossipLine(id);
+  if (gossip && rand('live') < 0.35) return gossip;
   if (id === 'isolde' && G.stamina <= 25 && B.exhausted) return B.exhausted[0];
   if (id === 'isolde' && G.stamina <= 50 && B.tired) return B.tired[0];
   if (id === 'aldwin' && G.network.connected.general && B.postConnect && rand('live') < 0.4) return B.postConnect[0];
   if (id === 'aldwin' && G.flags.flyerTaken && !G.network.connected.general && B.flyer) return B.flyer[0];
-  if (id === 'rolf' && G.hour >= 17 && B.evening && rand('live') < 0.6) return B.evening[0];
+  if (id === 'rolf' && G.hour >= 17 && B.evening && (G.network.stage || 0) < 5 && rand('live') < 0.6) return B.evening[0];
   if (id === 'bramm' && rest && G.network.connected.general && B.restFree) return B.restFree[0];
   if (id === 'sable' && rest && G.flags.shoreWitnessed && B.benchShared && rand('live') < 0.5) return B.benchShared[0];
   if (id === 'fen' && (G.hour >= 17 || G.hour < 8) && B.dusk && rand('live') < 0.5) return B.dusk[0];
+  // 4. Restday branch
+  const pool = [];
   if (rest && B.rest) pool.push(...B.rest);
-  if ((G.weather === 'rain') && B.rain) pool.push(...B.rain, ...(B.rain || []));
+  // 6. weather override outranks normal small talk
+  if (WET(G.weather) && B.rain) pool.push(...B.rain, ...B.rain);
   if (season === 'Winter' && B.winter) pool.push(...B.winter);
+  // 5. affection tier
   if (hearts >= 5 && B.heartHigh) pool.push(...B.heartHigh);
+  // 7. random among the variants, base as fallthrough
   pool.push(...B.base);
   return pool[Math.floor(rand('live') * pool.length)];
 }
+// Repeat-talk lines are terse and human (§5) — and worth no affection.
+const AGAIN_LINES = {
+  bramm: 'Still here. Hm.', hetta: 'Back already? The fire’s where you left it.',
+  corwin: 'You again! Excellent!', isolde: 'Hello again. (Twice in a day. Noted, warmly.)',
+  rolf: 'Twice in one day. Slow farm?', maren: 'Back for more! There’s always soup.',
+  greta: 'Again? The goose approves.', aldwin: 'Twice blessed, this doorway.',
+  ness: 'Yep.', fen: 'Still sweeping.', pip: 'HI AGAIN!!', sable: 'Again. The day repeats its good parts.'
+};
 
 /* ---- gifts ---- */
 function giftableHeld() {
@@ -2713,14 +2958,15 @@ function giveGift(npc) {
   const p = SOCIAL.prefs[id] || { loved: [], liked: [], disliked: [] };
   const B = LINES[id] || {};
   const bday = isBirthday(id, G.day);
+  // HM64 gift weights (§4): loved +3, liked +1, disliked −2; birthdays ×5.
   let delta, line, mood;
-  if (p.loved.includes(itemId)) { delta = 2; line = B.loved; mood = 'happy'; }
-  else if (p.disliked.includes(itemId)) { delta = -1; line = B.disliked; mood = 'sad'; }
+  if (p.loved.includes(itemId)) { delta = 3; line = B.loved; mood = 'happy'; }
+  else if (p.disliked.includes(itemId)) { delta = -2; line = B.disliked; mood = 'sad'; }
   else { delta = 1; line = B.liked; mood = 'happy'; }
-  if (bday) { delta = Math.max(delta * 2, delta + 3) * (delta > 0 ? 1 : 1); line = (delta > 0 && B.birthday) || line; mood = delta > 0 ? 'surprised' : mood; }
+  if (bday && delta > 0) { delta *= 5; line = B.birthday || line; mood = 'surprised'; }
   STORY.heart(id, delta);
   // learned loves fill the Villagers wall by discovery
-  if (delta >= 2) {
+  if (delta >= 3) {
     const learned = G.flags['learned_' + id] = G.flags['learned_' + id] || [];
     if (!learned.includes(itemId)) learned.push(itemId);
   }
@@ -2776,7 +3022,7 @@ function deliverJob(npc) {
       job.payDay = G.day + CONFIG.CHECK_LAG_DAYS;
       say([{ who: npc.id, text: 'Perfect. I’ll send payment along — check’s in the mail, the usual two days. You know how it goes around here.', mood: 'happy' }]);
     }
-    STORY.heart(npc.id, 1);
+    STORY.heart(npc.id, 4);
     jline('Finished ' + CAST[npc.id].name + '’s order — ' + job.qty + '× ' + ITEMS[job.item].name + ' for $' + job.reward + (connected ? ', settled on the spot.' : ', payment by mail. Naturally.'));
     updateHUD();
   });
@@ -2814,6 +3060,13 @@ function socialTalk(npc) {
     });
     return;
   }
+  // First talk each day earns a point (§4); later talks branch terse.
+  if (G.flags['talked_' + npc.id] === G.day) {
+    say([{ who: npc.id, text: AGAIN_LINES[npc.id] || '…' }]);
+    return;
+  }
+  G.flags['talked_' + npc.id] = G.day;
+  STORY.heart(npc.id, 1);
   const bday = isBirthday(npc.id, G.day);
   const lines = [{ who: npc.id, text: pickTalkLine(npc.id) }];
   if (bday) lines.unshift('A little bunting on the door, a certain lightness: it’s ' + CAST[npc.id].name + '’s birthday today.');
@@ -2824,45 +3077,45 @@ function socialTalk(npc) {
 // Regrow crops produce every `regrow` days after maturity.
 Object.assign(CONFIG.CROPS, {
   // spring
-  peas:      { name: 'Peas',      icon: '🫛', seasons: ['Spring'], days: 3, seed: 26, sell: 9,  color: 0x7FA85A, packet: 6, regrow: 2 },
-  cabbage:   { name: 'Cabbage',   icon: '🥬', seasons: ['Spring'], days: 3, seed: 32, sell: 16, color: 0x8FBF7A, packet: 6 },
+  peas:      { name: 'Peas',      icon: '🫛', seasons: ['Spring'], days: 3, seed: 26, sell: 8,  color: 0x7FA85A, packet: 6, regrow: 2 },
+  cabbage:   { name: 'Cabbage',   icon: '🥬', seasons: ['Spring'], days: 3, seed: 32, sell: 9, color: 0x8FBF7A, packet: 6 },
   // summer
   tomato:    { name: 'Tomato',    icon: '🍅', seasons: ['Summer'], days: 3, seed: 28, sell: 9,  color: 0xC65B4B, packet: 6, regrow: 1 },
-  corn:      { name: 'Corn',      icon: '🌽', seasons: ['Summer'], days: 3, seed: 30, sell: 11, color: 0xE0C070, packet: 6, regrow: 2 },
-  melon:     { name: 'Melon',     icon: '🍈', seasons: ['Summer'], days: 3, seed: 34, sell: 19, color: 0xA8C88A, packet: 6 },
-  sunflower: { name: 'Sunflower', icon: '🌻', seasons: ['Summer'], days: 2, seed: 24, sell: 10, color: 0xE8B84C, packet: 6, seedsBack: true },
-  pepper:    { name: 'Pepper',    icon: '🫑', seasons: ['Summer'], days: 2, seed: 26, sell: 8,  color: 0xB3574C, packet: 6, regrow: 2 },
-  blueberry: { name: 'Blueberry', icon: '🫐', seasons: ['Summer'], days: 3, seed: 32, sell: 12, color: 0x6A6AA0, packet: 6, regrow: 2 },
+  corn:      { name: 'Corn',      icon: '🌽', seasons: ['Summer'], days: 3, seed: 30, sell: 12, color: 0xE0C070, packet: 6, regrow: 2 },
+  melon:     { name: 'Melon',     icon: '🍈', seasons: ['Summer'], days: 3, seed: 34, sell: 12, color: 0xA8C88A, packet: 6 },
+  sunflower: { name: 'Sunflower', icon: '🌻', seasons: ['Summer'], days: 2, seed: 24, sell: 9, color: 0xE8B84C, packet: 6, seedsBack: true },
+  pepper:    { name: 'Pepper',    icon: '🫑', seasons: ['Summer'], days: 2, seed: 26, sell: 7,  color: 0xB3574C, packet: 6, regrow: 2 },
+  blueberry: { name: 'Blueberry', icon: '🫐', seasons: ['Summer'], days: 3, seed: 32, sell: 10, color: 0x6A6AA0, packet: 6, regrow: 2 },
   // autumn
-  pumpkin:   { name: 'Pumpkin',   icon: '🎃', seasons: ['Autumn'], days: 3, seed: 36, sell: 22, color: 0xD08A3C, packet: 4, fair: true },
-  yam:       { name: 'Yam',       icon: '🍠', seasons: ['Autumn'], days: 2, seed: 26, sell: 9,  color: 0xB07E52, packet: 6, regrow: 2 },
-  eggplant:  { name: 'Eggplant',  icon: '🍆', seasons: ['Autumn'], days: 3, seed: 28, sell: 10, color: 0x6A4A7A, packet: 6, regrow: 2 },
-  cranberry: { name: 'Cranberry', icon: '🍒', seasons: ['Autumn'], days: 3, seed: 34, sell: 13, color: 0xA34A4A, packet: 6, regrow: 2 }
+  pumpkin:   { name: 'Pumpkin',   icon: '🎃', seasons: ['Autumn'], days: 3, seed: 36, sell: 20, color: 0xD08A3C, packet: 4, fair: true },
+  yam:       { name: 'Yam',       icon: '🍠', seasons: ['Autumn'], days: 2, seed: 26, sell: 8,  color: 0xB07E52, packet: 6, regrow: 2 },
+  eggplant:  { name: 'Eggplant',  icon: '🍆', seasons: ['Autumn'], days: 3, seed: 28, sell: 6, color: 0x6A4A7A, packet: 6, regrow: 2 },
+  cranberry: { name: 'Cranberry', icon: '🍒', seasons: ['Autumn'], days: 3, seed: 34, sell: 11, color: 0xA34A4A, packet: 6, regrow: 2 }
 });
 // summer forage joins the table
 CONFIG.FORAGE.Summer = [
   { id: 'honeycomb', name: 'Honeycomb', icon: '🍯', sell: 12 },
-  { id: 'fern', name: 'Fiddlehead', icon: '🌿', sell: 8 },
-  { id: 'shell', name: 'River Shell', icon: '🐚', sell: 6 }
+  { id: 'fern', name: 'Fiddlehead', icon: '🌿', sell: 5 },
+  { id: 'shell', name: 'River Shell', icon: '🐚', sell: 4 }
 ];
 
 /* ---- fish: ~14 by zone × season, a few rain-only (§7) ---- */
 // zone: river | pool | ocean. rarity drives the hit-zone width.
 const FISH = [
-  { id: 'chub',      name: 'Creek Chub',    icon: '🐟', sell: 9,  zones: ['river'], seasons: null, rarity: 0 },
-  { id: 'perch',     name: 'Amber Perch',   icon: '🐟', sell: 12, zones: ['river', 'pool'], seasons: ['Autumn', 'Winter'], rarity: 0 },
-  { id: 'trout',     name: 'Valley Trout',  icon: '🐟', sell: 15, zones: ['river'], seasons: ['Spring', 'Autumn'], rarity: 1 },
-  { id: 'bream',     name: 'Bridge Bream',  icon: '🐟', sell: 11, zones: ['pool'], seasons: null, rarity: 0 },
-  { id: 'catfish',   name: 'Mud Catfish',   icon: '🐟', sell: 22, zones: ['river', 'pool'], seasons: null, rarity: 2, rainOnly: true },
-  { id: 'pike',      name: 'Reed Pike',     icon: '🐟', sell: 19, zones: ['pool'], seasons: ['Summer'], rarity: 2 },
-  { id: 'smelt',     name: 'Ice Smelt',     icon: '🐟', sell: 13, zones: ['river', 'pool'], seasons: ['Winter'], rarity: 1 },
-  { id: 'carp',      name: 'Old Carp',      icon: '🐟', sell: 7,  zones: ['pool'], seasons: null, rarity: 0 },
-  { id: 'salmon',    name: 'Run Salmon',    icon: '🐟', sell: 26, zones: ['river'], seasons: ['Autumn'], rarity: 2 },
-  { id: 'sardine',   name: 'Sardine',       icon: '🐟', sell: 8,  zones: ['ocean'], seasons: null, rarity: 0 },
-  { id: 'flounder',  name: 'Flounder',      icon: '🐟', sell: 14, zones: ['ocean'], seasons: null, rarity: 1 },
-  { id: 'seabass',   name: 'Sea Bass',      icon: '🐟', sell: 21, zones: ['ocean'], seasons: ['Summer', 'Autumn'], rarity: 2 },
-  { id: 'stormcod',  name: 'Storm Cod',     icon: '🐟', sell: 28, zones: ['ocean'], seasons: null, rarity: 2, rainOnly: true },
-  { id: 'moonfish',  name: 'Moonfish',      icon: '🐟', sell: 40, zones: ['pool', 'ocean'], seasons: null, rarity: 3, nightOnly: true }
+  { id: 'chub',      name: 'Creek Chub',    icon: '🐟', sell: 4,  zones: ['river'], seasons: null, rarity: 0 },
+  { id: 'perch',     name: 'Amber Perch',   icon: '🐟', sell: 6, zones: ['river', 'pool'], seasons: ['Autumn', 'Winter'], rarity: 0 },
+  { id: 'trout',     name: 'Valley Trout',  icon: '🐟', sell: 10, zones: ['river'], seasons: ['Spring', 'Autumn'], rarity: 1 },
+  { id: 'bream',     name: 'Bridge Bream',  icon: '🐟', sell: 5, zones: ['pool'], seasons: null, rarity: 0 },
+  { id: 'catfish',   name: 'Mud Catfish',   icon: '🐟', sell: 14, zones: ['river', 'pool'], seasons: null, rarity: 2, rainOnly: true },
+  { id: 'pike',      name: 'Reed Pike',     icon: '🐟', sell: 12, zones: ['pool'], seasons: ['Summer'], rarity: 2 },
+  { id: 'smelt',     name: 'Ice Smelt',     icon: '🐟', sell: 7, zones: ['river', 'pool'], seasons: ['Winter'], rarity: 1 },
+  { id: 'carp',      name: 'Old Carp',      icon: '🐟', sell: 3,  zones: ['pool'], seasons: null, rarity: 0 },
+  { id: 'salmon',    name: 'Run Salmon',    icon: '🐟', sell: 18, zones: ['river'], seasons: ['Autumn'], rarity: 2 },
+  { id: 'sardine',   name: 'Sardine',       icon: '🐟', sell: 4,  zones: ['ocean'], seasons: null, rarity: 0 },
+  { id: 'flounder',  name: 'Flounder',      icon: '🐟', sell: 8, zones: ['ocean'], seasons: null, rarity: 1 },
+  { id: 'seabass',   name: 'Sea Bass',      icon: '🐟', sell: 13, zones: ['ocean'], seasons: ['Summer', 'Autumn'], rarity: 2 },
+  { id: 'stormcod',  name: 'Storm Cod',     icon: '🐟', sell: 18, zones: ['ocean'], seasons: null, rarity: 2, rainOnly: true },
+  { id: 'moonfish',  name: 'Moonfish',      icon: '🐟', sell: 30, zones: ['pool', 'ocean'], seasons: null, rarity: 3, nightOnly: true }
 ];
 function fishTableHere(x, z) {
   const W = G.world;
@@ -2971,14 +3224,14 @@ function backpackCap() { return G.backpack || 12; }
 function stackCount() { return Object.keys(G.inventory).length; }
 
 const RECIPES = [
-  { id: 'roast', name: 'Field Roast', icon: '🍲', a: 'potato', b: 'carrot', stamina: 45, teacher: 'maren' },
-  { id: 'jam', name: 'Berry Jam', icon: '🫙', a: 'berries', b: 'strawberry', stamina: 35, teacher: 'greta' },
-  { id: 'tea', name: 'Winter Tea', icon: '🍵', a: 'wintergreen', b: 'honeycomb', stamina: 55, teacher: 'isolde' }
+  { id: 'roast', name: 'Field Roast', icon: '🍲', a: 'potato', b: 'carrot', stamina: 20, teacher: 'maren' },
+  { id: 'jam', name: 'Berry Jam', icon: '🫙', a: 'berries', b: 'strawberry', stamina: 18, teacher: 'greta' },
+  { id: 'tea', name: 'Winter Tea', icon: '🍵', a: 'wintergreen', b: 'honeycomb', stamina: 25, teacher: 'isolde' }
 ];
 function knownRecipes() { return RECIPES.filter(r => G.flags['recipe_' + r.id]); }
 function maybeTeachRecipe(id) {
   if (!G.upgrades || !G.upgrades.kitchen) return false;
-  const r = RECIPES.find(r => r.teacher === id && !G.flags['recipe_' + r.id] && (G.hearts[id] || 0) >= 4);
+  const r = RECIPES.find(r => r.teacher === id && !G.flags['recipe_' + r.id] && displayHearts(id) >= 4);
   if (!r) return false;
   G.flags['recipe_' + r.id] = true;
   say([{ who: id, text: 'You’ve got a kitchen now, I hear. Here — my ' + r.name.toLowerCase() + '. ' +
@@ -3000,7 +3253,8 @@ function cookMenu() {
     const r = known[i];
     if ((G.inventory[r.a] || 0) < 1 || (G.inventory[r.b] || 0) < 1) { toast('Missing ingredients.'); return; }
     takeItem(r.a, 1); takeItem(r.b, 1);
-    G.stamina = Math.min(CONFIG.STAMINA_MAX, G.stamina + r.stamina);
+    G.stamina = Math.min(CONFIG.STAMINA_MAX + (G.maxStaminaBonus || 0), G.stamina + r.stamina);
+    ITEMS['dish_' + r.id] = ITEMS['dish_' + r.id] || { name: r.name, icon: r.icon, sell: 0, food: r.stamina };
     sfx('pick');
     toast(r.name + ' — warmth from the inside out.');
     G.dayFlags.cooked = true;
@@ -3059,7 +3313,7 @@ function runFestival(season) {
       ] },
       { fn: () => {
         jline('Firefly Night. Lanterns on the river, the town quiet in the good way. Even Ness came, and stood at the back, and stayed.');
-        STORY.heart('maren', 1);
+        STORY.heart('maren', 6);
       } },
       { fn: endDay }
     ]);
@@ -3088,7 +3342,7 @@ function runFestival(season) {
         if (win) {
           G.money += 100;
           G.ledger.entries.push({ day: G.day, amount: 100, enterprise: 'Odd Jobs', note: 'Fair ribbon prize' });
-          STORY.heart('rolf', 1);
+          STORY.heart('rolf', 8);
           jline('WON THE FAIR. The ribbon is blue and the pumpkin was ' + best + ' points of stubborn daily watering. Rolf shook my hand like it cost him, which is how you know it counted.');
         } else if (best) {
           jline('Entered the fair: ' + best + ' points. Rolf took the ribbon again at ' + rolfSize + '. "Next year" is starting to sound like a family motto.');
@@ -3259,7 +3513,7 @@ const VIG = {
 function tryVignette(id) {
   const v = VIG[id];
   if (!v) return false;
-  const hearts = G.hearts[id] || 0;
+  const hearts = displayHearts(id);
   const thresholds = Object.keys(v).map(Number).sort((a, b) => a - b);
   for (const t of thresholds) {
     if (hearts < t || G.flags['vig_' + id + '_' + t]) continue;
@@ -3270,7 +3524,7 @@ function tryVignette(id) {
       showChoice(sc.choice, i => {
         const reply = sc.replies[i];
         say([typeof reply === 'string' ? reply : reply], () => {
-          STORY.heart(id, 1);
+          STORY.heart(id, 6);
           jline('A moment with ' + CAST[id].name + ' today — the kind that doesn’t fit in small talk. (' + t + ' hearts.)');
         });
       });
@@ -3300,7 +3554,7 @@ const ARC = {
       ] },
       { fn: () => {
         connectShop('forge');
-        STORY.heart('hetta', 1);
+        STORY.heart('hetta', 8);
         addForgeAwning();
         jline('Hetta’s forge joined the network today. By afternoon she’d priced the new forge hood out loud — from the "someday" folder to a delivery date, in one morning.');
         ARC.updateStage();
@@ -3321,7 +3575,7 @@ const ARC = {
       ] },
       { fn: () => {
         connectShop('tavern');
-        STORY.heart('maren', 1);
+        STORY.heart('maren', 8);
         G.flags.forecastUnlocked = true;
         jline('The Bluebird joined the network — Maren erased the tab board like a woman settling a decades-old score. The Ledger grew a forecast page tonight. The future, itemized.');
         ARC.updateStage();
@@ -3403,7 +3657,7 @@ const CONTRACT_DEFS = {
 function contractEligible(id) {
   const def = CONTRACT_DEFS[id];
   if (!def || (G.contracts && G.contracts[id])) return false;
-  if ((G.hearts[id] || 0) < 6) return false;
+  if (displayHearts(id) < 6) return false;
   if (def.conn && !G.network.connected[def.conn]) return false;
   return true;
 }
@@ -3420,7 +3674,7 @@ function proposeContract(npc) {
       G.contracts = G.contracts || {};
       G.contracts[id] = { good: def.good, qty: def.qty, premium: 1.15, status: 'active', miss: 0 };
       sfx('chime');
-      STORY.heart(id, 1);
+      STORY.heart(id, 8);
       say([{ who: id, text: 'Then it’s standing. First delivery this Restday. Welcome to being counted on.', mood: 'happy' }]);
       jline(CAST[id].name + ' asked me to be their standing supplier — ' + def.qty + '× ' + ITEMS[def.good].name.toLowerCase() + ' every Restday at a premium. In this valley, that’s a medal.');
     });
@@ -3643,7 +3897,7 @@ const LIFE = {
         G.network.connected.rolf = true;
         G.network.stage = 5;
         sfx('chime');
-        STORY.heart('rolf', 2);
+        STORY.heart('rolf', 20);
         jline('Rolf came to MY fence this morning and asked about the tags — pride intact, exactly as he said. The last holdout but one. His evenings start tonight.');
       } },
       { say: [
@@ -3664,7 +3918,7 @@ const LIFE = {
       { who: 'ness', text: 'The green marks suit the town fine. Town suits me fine too. Both things are true, and nobody owes anybody a gadget. You want worms Restday, cash and a handshake, same as ever.' }
     ], () => {
       jline('Old Ness declined the network today with a forty-year notebook and complete dignity. "My books balance every night." They do, too. The valley is big enough for both kinds of ledger.');
-      STORY.heart('ness', 1);
+      STORY.heart('ness', 8);
     });
     return true;
   },
@@ -3741,8 +3995,8 @@ const LIFE = {
   }
 };
 function avgHearts() {
-  const vals = Object.values(G.hearts);
-  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+  const ids = Object.keys(G.hearts);
+  return ids.length ? ids.reduce((a, id) => a + displayHearts(id), 0) / ids.length : 0;
 }
 
 /* ---- Bramm & Sable: one step per shared Restday (§12) ---- */
@@ -3891,7 +4145,11 @@ function exportYearReviewPNG(reviewYear) {
     }
     y += 100;
   }
-  ctx.font = '12px Trebuchet MS'; ctx.fillStyle = P.green; ctx.textAlign = 'center';
+  const regard = Object.keys(G.hearts).reduce((s2, id) => s2 + displayHearts(id), 0);
+  const worked = G.world.tiles.filter(t => t.s === 'till' || t.crop).length;
+  ctx.font = 'bold 15px Trebuchet MS'; ctx.fillStyle = P.green; ctx.textAlign = 'center';
+  ctx.fillText('THE VALLEY’S REGARD: ' + (regard + worked + Object.keys(G.upgrades || {}).length * 5), 360, 820);
+  ctx.font = '12px Trebuchet MS';
   ctx.fillText('ALMANAC · made with Ambrook · ambrook.com', 360, 848);
   ctx.fillText('this valley: seed ' + G.world.seed, 360, 866);
   const a = document.createElement('a');
@@ -3931,7 +4189,7 @@ function toast(msg, ms) {
 function fadeOut(cb) { $('fade').style.opacity = 1; setTimeout(cb, 650); }
 function fadeIn(cb) { $('fade').style.opacity = 0; setTimeout(() => cb && cb(), 650); }
 
-const WEATHER_ICON = { sun: '☀', cloud: '☁', rain: '🌧', snow: '❄' };
+const WEATHER_ICON = { sun: '☀', cloud: '☁', rain: '🌧', snow: '❄', storm: '🌀' };
 function updateHUD() {
   const season = seasonOf(G.day), dos = dayOfSeason(G.day);
   $('hudDate').textContent = season + ' ' + dos + ', Year ' + yearOf(G.day) +
@@ -4144,7 +4402,15 @@ function renderInventoryTab(body) {
     cell.appendChild(el('div', 'invIcon', it.icon));
     cell.appendChild(el('div', 'invName', it.name));
     cell.appendChild(el('div', 'invCt', String(G.inventory[id])));
-    cell.onclick = () => { G.heldItem = id; updateHUD(); renderMenu(); };
+    cell.onclick = () => {
+      if (typeof foodValue === 'function' && foodValue(id) > 0) {
+        showChoice(['Hold it', 'Eat it (+' + foodValue(id) + ')'], c => {
+          if (c === 0) { G.heldItem = id; updateHUD(); }
+          else eatHeld(id);
+          renderMenu();
+        });
+      } else { G.heldItem = id; updateHUD(); renderMenu(); }
+    };
     grid.appendChild(cell);
   }
   body.appendChild(grid);
@@ -4169,7 +4435,7 @@ function renderVillagersTab(body) {
     const nm = el('div');
     nm.appendChild(el('b', null, rec.name));
     info.appendChild(nm);
-    const hearts = G.hearts[id] || 0;
+    const hearts = displayHearts(id);
     const hp = el('div', null, '♥'.repeat(hearts));
     hp.style.cssText = 'color:#B3574C;letter-spacing:1px';
     const dim = el('span', null, '♥'.repeat(Math.max(0, 10 - hearts)));
@@ -4720,11 +4986,13 @@ const TITLE = {
 const STORY = {
   objective: null, onCantAfford: null, onShopClosed: null,
 
+  // Affection is HM64-style hidden points (§4): 13 points per displayed heart,
+  // cap 130. A heart ≈ 3-4 days of steady attention; gifts never outweigh talk.
   meet(id) {
-    if (!(id in G.hearts)) { G.hearts[id] = 1; }
+    if (!(id in G.hearts)) { G.hearts[id] = 4; }
   },
-  heart(id, n) {
-    G.hearts[id] = clamp((G.hearts[id] || 0) + n, 0, 10);
+  heart(id, pts) {
+    G.hearts[id] = clamp((G.hearts[id] || 0) + pts, 0, 130);
   },
 
   /* ---- scene runner: walk / say / do, time frozen ---- */
@@ -5019,7 +5287,7 @@ const STORY = {
         G.flags.flyerTaken = true;
         jline('Aldwin at the fence with a flyer. "Money that exists but isn’t here yet" — he said it like a diagnosis. The check, for the record: still not here.');
         setObjective('The check is still in the mail. Get through the day');
-        STORY.heart('aldwin', 1);
+        STORY.heart('aldwin', 8);
       } },
       { walk: { id: 'aldwin', x: W.bridge.x + 8, z: W.pathZ } },
       { fn: () => { delete ACTORS.aldwin.schedKey; } }
@@ -5066,7 +5334,7 @@ const STORY = {
         G.network.stage = 2;
         if (R.glyphs.general) R.glyphs.general.visible = true;
         sfx('chime');
-        STORY.heart('bramm', 2);
+        STORY.heart('bramm', 20);
         jline('Sat an hour with Bramm and thirty years of receipts. When the green glyph lit on his counter he grunted — for Bramm, that’s a parade. His store settles instantly now.');
       } },
       { say: [
@@ -5175,6 +5443,14 @@ const STORY = {
     const highlights = G.journal.slice(-6).map(e => e.lines[0]).filter(Boolean);
     for (const h of highlights) body.appendChild(el('div', null, '  · ' + h));
     card.appendChild(body);
+    // the valley's regard (§7): relationships graded with the farm, additively
+    const regard = Object.keys(G.hearts).reduce((s, id) => s + displayHearts(id), 0);
+    const worked = G.world.tiles.filter(t => t.s === 'till' || t.crop).length;
+    const exts = Object.keys(G.upgrades || {}).length;
+    const rg = el('div', null, 'The valley’s regard: ' + (regard + worked + exts * 5) +
+      '  (' + regard + ' hearts · ' + worked + ' worked tiles · ' + exts + ' improvements)');
+    rg.style.cssText = 'color:var(--green);font-weight:bold;margin:6px 0';
+    card.appendChild(rg);
     // customers strip (standing orders held)
     const customers = Object.keys(G.contracts || {});
     if (customers.length) {
@@ -5502,7 +5778,8 @@ window.ALMANAC = {
   sleep() { doSleep(); },
   state() {
     return { mode: G.mode, day: G.day, season: seasonOf(G.day), hour: +G.hour.toFixed(2),
-      weather: G.weather, money: G.money, checks: G.pendingChecks, fps: G.fps.value,
+      weather: G.weather, money: G.money, stamina: G.stamina, fatigue: +(G.fatigue || 0).toFixed(1),
+      checks: G.pendingChecks, fps: G.fps.value,
       objective: G.flags.objective, connected: G.network.connected, ui: G.uiOpen,
       dlg: DLG.active, seed: G.world && G.world.seed, town: G.world && G.world.townName };
   },
