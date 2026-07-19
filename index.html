@@ -68,6 +68,44 @@
     but work a row of three; raw food small, cooked food good, dishes storable.
   - Night mostly *sounds* like night: the overworld loop stops after dark.
   - Year review adds "the valley's regard" (hearts + worked tiles + upgrades).
+  V2 — "THE HM64 PASS" (rendering TECHNIQUE only, reproduced from a decomp
+  mechanics study; every asset below is generated at boot from original code —
+  no textures, models, sprites, or audio from the reference game or repo):
+  - True tile-mesh terrain (§1): one indexed BufferGeometry, per-tile atlas
+    UVs, corner heights quantized to 0.25m steps (terraced banks/path cuts,
+    not smooth noise), per-vertex warm contact shading. Replaces the v1
+    painted ground plane.
+  - Projection locked to the reference ratio (§2): ZONE_HEIGHT retuned so
+    tiles read ~28-32px and a standing character ~56-64px on the 640-wide
+    buffer (character billboard set to 1.34x2.0m at that zoom).
+  - Props become sprites (§3): well, mailbox, bench, marker, fence posts, and
+    both tree kinds are modeled once, baked under the headlamp light at boot,
+    and drawn as Y-sorted billboards. Buildings stay true 3D geometry — that
+    split is deliberate. Round-tree canopies are an overlapping-lump cluster
+    rather than one icosahedron (a single low-poly hull can silhouette as a
+    sharp pyramid from the fixed camera; the lump cluster reads as foliage
+    from any angle). Crops became painted sprite stages (stage0/1 shared,
+    mid/ripe per-crop, plus a shared dead-stalk sprite for the reaper).
+  - CI4 palette discipline (§4): every baked texture (terrain atlas, prop
+    sprites, crop sprites) runs through a 16-color quantization pass after
+    rendering — genuine color-bucket economy, not a filter.
+  - Real seasonal texture sets (§5): the terrain atlas and prop sprite bank
+    are repainted at boot and on every season change — autumn grass goes dry
+    and patchy, winter tiles go snow-textured with dark path cuts — not tinted.
+  - Weather/lighting values (§6): unchanged from the v2 mechanics pass, now
+    also driving a night-only sparse music arrangement (bass breathing, lead
+    surfacing twice a bar) instead of full silence.
+  - Animation timing in 30fps ticks (§7): the walk cycle holds 7,8,7,8 ticks
+    per frame rather than an even split — the slightly uneven cadence is the
+    intended signature, not a bug.
+  - Message-box metrics (§8): dialogue re-wraps to ~3 lines/~28 chars, one
+    thought per box, via sentence-boundary splitting at the `say()` pipeline;
+    the choice menu renders as a small sub-box beside the main box.
+  - Not done: the reference's building-interior tile sets (ALMANAC's interiors
+    are still cream-fade stubs, unrelated to this pass) and a literal N64
+    framebuffer-resolution render target — pixel density is matched via the
+    zone-height/character-scale ratio instead, which verified correctly
+    on-screen without the extra render-target complexity.
 -->
 <style>
   :root {
@@ -119,15 +157,16 @@
     width:86%; max-width:760px; background:var(--cream); border:4px solid var(--border);
     border-radius:14px; padding:12px 16px 14px; display:none; min-height:92px; }
   #dlgName { font-weight:bold; font-size:13px; color:#6b4a2e; margin-bottom:3px; }
-  #dlgText { font-size:16px; line-height:1.45; min-height:46px; }
+  #dlgText { font-size:19px; line-height:1.4; min-height:80px; max-width:34ch; }
   #dlgMore { position:absolute; right:14px; bottom:6px; font-size:14px;
     animation:bob 1s ease-in-out infinite; }
   #dlgPortrait { position:absolute; left:-10px; top:-74px; width:84px; height:84px;
     border:4px solid var(--border); border-radius:12px; background:var(--cream);
     display:none; image-rendering:pixelated; }
   @keyframes bob { 0%,100%{transform:translateY(0)} 50%{transform:translateY(4px)} }
-  #choices { position:absolute; right:20px; bottom:120px; display:none;
-    flex-direction:column; gap:6px; }
+  #choices { position:absolute; right:8%; bottom:132px; display:none;
+    flex-direction:column; gap:4px; background:var(--cream);
+    border:3px solid var(--border); border-radius:10px; padding:6px; }
   .choiceBtn { background:var(--cream); border:3px solid var(--border); border-radius:10px;
     padding:7px 18px; font-size:15px; font-weight:bold; color:var(--ink); cursor:pointer;
     font-family:inherit; text-align:left; }
@@ -279,7 +318,7 @@ const CONFIG = {
   VIEW_W: 640, VIEW_H: 360,
   CAM_OFFSET: { x: 0, y: 14, z: 12 },
   CAM_LERP: 0.06, CAM_DEADZONE: 0.6,
-  ZONE_HEIGHT: { farm: 15, town: 13, wild: 14, interior: 11 },
+  ZONE_HEIGHT: { farm: 12.5, town: 11.5, wild: 12.5, interior: 10 },   // ~28-32px tiles (§2)
   ZONE_EASE: 0.02,
 
   DAY_START: 6, DAY_END: 24,
@@ -894,6 +933,550 @@ function tickWater(dt) {
     WATER.tex.needsUpdate = true;
   }
 }
+/* =============== RENDER: true tile-mesh terrain (HM64 pass §1) =========== */
+// The ground is not a painted plane: it is a grid of individually-authored
+// tiles, each a quad with its own corner heights (quantized to 0.25m steps),
+// its own 32×32 texture from a generated atlas, and per-vertex warm contact
+// shading. Seasons get whole repainted atlases, not tints (§5).
+
+const TER = {
+  mesh: null, atlasCanvas: null, atlasTex: null,
+  cls: null, season: null,
+  // atlas layout (8 columns × 4 rows of 32px tiles)
+  T: { GRASS0: 0, GRASS1: 1, GRASS2: 2, PATH: 3, TILLED: 4, WATERED: 5, SAND: 6, STONE: 7,
+       EDGE_N: 8, EDGE_E: 9, EDGE_S: 10, EDGE_W: 11, SCRUFF: 12, WATER: 13, WEDGE: 14, SNOWP: 15 }
+};
+const TER_COLS = 8, TER_ROWS = 4, TER_PX = 32;
+
+/* ---- CI4 flavor (§4): quantize every generated texture to ≤16 colors ---- */
+function quantizeCanvas(canvas, n) {
+  n = n || 16;
+  const ctx = canvas.getContext('2d');
+  const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const d = img.data;
+  const buckets = new Map();  // 4-bit/channel bucket -> [count, rSum, gSum, bSum]
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 40) continue;
+    const key = (d[i] >> 4) << 8 | (d[i + 1] >> 4) << 4 | (d[i + 2] >> 4);
+    let b = buckets.get(key);
+    if (!b) buckets.set(key, b = [0, 0, 0, 0]);
+    b[0]++; b[1] += d[i]; b[2] += d[i + 1]; b[3] += d[i + 2];
+  }
+  const pal = [...buckets.values()].sort((a, b) => b[0] - a[0]).slice(0, n)
+    .map(b => [b[1] / b[0], b[2] / b[0], b[3] / b[0]]);
+  if (!pal.length) return canvas;
+  for (let i = 0; i < d.length; i += 4) {
+    if (d[i + 3] < 40) { d[i + 3] = 0; continue; }
+    let best = 0, bd = 1e9;
+    for (let p = 0; p < pal.length; p++) {
+      const dr = d[i] - pal[p][0], dg = d[i + 1] - pal[p][1], db = d[i + 2] - pal[p][2];
+      const dist = dr * dr + dg * dg + db * db;
+      if (dist < bd) { bd = dist; best = p; }
+    }
+    d[i] = pal[best][0]; d[i + 1] = pal[best][1]; d[i + 2] = pal[best][2];
+    d[i + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  return canvas;
+}
+
+/* ---- seasonal tile-family palettes: real repaints, not hue shifts ---- */
+const SEASON_TILES = {
+  Spring: { grass: '#7FA86A', grassLight: '#93BA78', grassDark: '#5E8A55', fleck: '#C8DCA0' },
+  Summer: { grass: '#6B9C58', grassLight: '#7FAE68', grassDark: '#4E7A48', fleck: '#8FBF6A' },
+  Autumn: { grass: '#9AA060', grassLight: '#B0A868', grassDark: '#7A8450', fleck: '#C4A45C' },
+  Winter: { grass: '#DDE4E0', grassLight: '#ECF0EC', grassDark: '#B8C2BC', fleck: '#F4F6F4' }
+};
+function paintTileInto(ctx, col, row, painter) {
+  ctx.save();
+  ctx.translate(col * TER_PX, row * TER_PX);
+  ctx.beginPath(); ctx.rect(0, 0, TER_PX, TER_PX); ctx.clip();
+  painter(ctx);
+  ctx.restore();
+}
+function speck(ctx, colors, count) {
+  for (let i = 0; i < count; i++) {
+    ctx.fillStyle = colors[Math.floor(rand('live') * colors.length)];
+    ctx.fillRect(Math.floor(rand('live') * TER_PX), Math.floor(rand('live') * TER_PX), 1, 1);
+  }
+}
+function buildTerrainAtlas(season) {
+  const S = SEASON_TILES[season], P = CONFIG.PALETTE, T = TER.T;
+  const winter = season === 'Winter';
+  if (!TER.atlasCanvas) {
+    TER.atlasCanvas = document.createElement('canvas');
+    TER.atlasCanvas.width = TER_COLS * TER_PX;
+    TER.atlasCanvas.height = TER_ROWS * TER_PX;
+  }
+  const ctx = TER.atlasCanvas.getContext('2d');
+  const at = i => [i % TER_COLS, Math.floor(i / TER_COLS)];
+  const grassPainter = variant => c => {
+    c.fillStyle = S.grass; c.fillRect(0, 0, 32, 32);
+    speck(c, [S.grassLight, S.grassDark, S.fleck], 60 + variant * 25);
+    if (season === 'Autumn') {           // dry and patchy, not hue-shifted
+      c.fillStyle = '#B8A468';
+      for (let i = 0; i < 3 + variant; i++) {
+        c.beginPath();
+        c.ellipse(rand('live') * 32, rand('live') * 32, 3 + rand('live') * 4, 2 + rand('live') * 3, 0, 0, 7);
+        c.fill();
+      }
+      speck(c, ['#C8B478', S.grassDark], 30);
+    }
+    if (winter) {                        // snow tiles with grass poking through
+      c.fillStyle = 'rgba(160,172,150,0.8)';
+      for (let i = 0; i < 6; i++) c.fillRect(Math.floor(rand('live') * 32), Math.floor(rand('live') * 32), 2, 1);
+    }
+    if (season === 'Spring' && variant === 2) {   // scattered blossom flecks
+      c.fillStyle = '#EAD8E4';
+      for (let i = 0; i < 5; i++) c.fillRect(Math.floor(rand('live') * 32), Math.floor(rand('live') * 32), 1, 1);
+    }
+  };
+  [T.GRASS0, T.GRASS1, T.GRASS2].forEach((idx, v) => paintTileInto(ctx, ...at(idx), grassPainter(v)));
+  const pathColor = winter ? '#8C7A5E' : P.path;   // winter: dark path cuts through snow
+  paintTileInto(ctx, ...at(T.PATH), c => {
+    c.fillStyle = pathColor; c.fillRect(0, 0, 32, 32);
+    speck(c, [winter ? '#7A6A50' : '#A8895C', winter ? '#9C8A6C' : '#C9AC7C'], 70);
+  });
+  paintTileInto(ctx, ...at(T.TILLED), c => {
+    c.fillStyle = P.tilled; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#7d573f', '#966c50'], 60);
+    c.fillStyle = 'rgba(60,40,28,.5)';
+    for (let y = 3; y < 32; y += 7) c.fillRect(0, y, 32, 2);
+  });
+  paintTileInto(ctx, ...at(T.WATERED), c => {
+    c.fillStyle = P.wateredSoil; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#5d4033', '#785443'], 60);
+    c.fillStyle = 'rgba(38,24,18,.55)';
+    for (let y = 3; y < 32; y += 7) c.fillRect(0, y, 32, 2);
+  });
+  paintTileInto(ctx, ...at(T.SAND), c => {
+    c.fillStyle = winter ? '#C8BCA4' : P.sand; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#C4B084', '#E8D8AC'], 50);
+  });
+  paintTileInto(ctx, ...at(T.STONE), c => {
+    c.fillStyle = winter ? '#B4B8B4' : P.stone; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#8C8C84', '#AEAEA6', winter ? '#D8DCD8' : '#90948C'], 55);
+  });
+  // grass→path transition edges (§1): fringe on the path side
+  const edge = dir => c => {
+    grassPainter(0)(c);
+    c.fillStyle = pathColor;
+    if (dir === 'N') { c.fillRect(0, 0, 32, 7); speck2(c, 0, 5, 32, 5); }
+    if (dir === 'S') { c.fillRect(0, 25, 32, 7); speck2(c, 0, 22, 32, 5); }
+    if (dir === 'W') { c.fillRect(0, 0, 7, 32); speck2(c, 5, 0, 5, 32); }
+    if (dir === 'E') { c.fillRect(25, 0, 7, 32); speck2(c, 22, 0, 5, 32); }
+  };
+  const speck2 = (c, x, y, w, h) => {
+    c.fillStyle = pathColor;
+    for (let i = 0; i < 14; i++) c.fillRect(x + Math.floor(rand('live') * w), y + Math.floor(rand('live') * h), 2, 1);
+  };
+  paintTileInto(ctx, ...at(T.EDGE_N), edge('N'));
+  paintTileInto(ctx, ...at(T.EDGE_E), edge('E'));
+  paintTileInto(ctx, ...at(T.EDGE_S), edge('S'));
+  paintTileInto(ctx, ...at(T.EDGE_W), edge('W'));
+  paintTileInto(ctx, ...at(T.SCRUFF), c => {
+    grassPainter(1)(c);
+    c.fillStyle = winter ? 'rgba(150,140,110,0.5)' : 'rgba(150,132,94,0.45)';
+    for (let i = 0; i < 8; i++) c.fillRect(Math.floor(rand('live') * 30), Math.floor(rand('live') * 30), 3, 2);
+  });
+  paintTileInto(ctx, ...at(T.WATER), c => {
+    c.fillStyle = P.water; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#5E96AC', '#84B4C8'], 40);
+  });
+  paintTileInto(ctx, ...at(T.WEDGE), c => {   // shallow water edge
+    c.fillStyle = '#8CB8C4'; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#A4CCD4', P.water], 45);
+  });
+  paintTileInto(ctx, ...at(T.SNOWP), c => {   // spare tile: packed snow / pale rock
+    c.fillStyle = '#E8ECE8'; c.fillRect(0, 0, 32, 32);
+    speck(c, ['#D4DCD4', '#F6F8F6'], 40);
+  });
+  // one CI4-style quantization over the whole atlas: shared family palettes
+  quantizeCanvas(TER.atlasCanvas, 48);   // ~16 per family across 3 families
+  if (!TER.atlasTex) {
+    TER.atlasTex = nearestTex(TER.atlasCanvas);
+  } else TER.atlasTex.needsUpdate = true;
+}
+
+/* ---- tile classification from the same worldgen data ---- */
+const TCLS = { GRASS: 0, PATH: 1, SAND: 2, WATER: 3, WEDGE: 4, STONE: 5, SCRUFF: 6 };
+function classifyTerrain() {
+  const W = G.world;
+  const MW = CONFIG.WORLD_W, MH = CONFIG.WORLD_H;
+  const cls = new Uint8Array(MW * MH);
+  const nearPathDist = (x, z) => {
+    let best = 1e9;
+    for (const p of W.paths) for (let i = 0; i < p.pts.length - 1; i++) {
+      const a = p.pts[i], b = p.pts[i + 1];
+      const l2 = dist2(a.x, a.z, b.x, b.z) || 1;
+      let t = ((x - a.x) * (b.x - a.x) + (z - a.z) * (b.z - a.z)) / l2;
+      t = clamp(t, 0, 1);
+      best = Math.min(best, dist2(x, z, lerp(a.x, b.x, t), lerp(a.z, b.z, t)) - p.w * p.w / 4);
+    }
+    return best;
+  };
+  for (let iz = 0; iz < MH; iz++) for (let ix = 0; ix < MW; ix++) {
+    const x = ix - 120 + 0.5, z = iz - 90 + 0.5;
+    let c = TCLS.GRASS;
+    if (z < -74) c = TCLS.STONE;
+    else if (isWaterAt(x, z)) c = TCLS.WATER;
+    else if (W.coastal && z > W.oceanZ - 3) c = TCLS.SAND;
+    else if (dist2(x, z, W.pool.x, W.pool.z) < (W.pool.r + 2.5) ** 2) c = TCLS.SAND;
+    else if (nearPathDist(x, z) < 0) c = TCLS.PATH;
+    else if (dist2(x, z, W.gazebo.x, W.gazebo.z) < 110) c = TCLS.PATH;   // the square apron
+    else if (x >= W.field.x0 && x < W.field.x0 + W.field.w && z >= W.field.z0 && z < W.field.z0 + W.field.h) c = TCLS.SCRUFF;
+    cls[iz * MW + ix] = c;
+  }
+  // shallow edges: water next to land
+  for (let iz = 0; iz < MH; iz++) for (let ix = 0; ix < MW; ix++) {
+    if (cls[iz * MW + ix] !== TCLS.WATER) continue;
+    const n = [cls[iz * MW + Math.max(0, ix - 1)], cls[iz * MW + Math.min(MW - 1, ix + 1)],
+      cls[Math.max(0, iz - 1) * MW + ix], cls[Math.min(MH - 1, iz + 1) * MW + ix]];
+    if (n.some(v => v !== TCLS.WATER && v !== TCLS.WEDGE)) cls[iz * MW + ix] = TCLS.WEDGE;
+  }
+  TER.cls = cls;
+}
+
+/* ---- corner heights on the shared lattice, snapped to 0.25m (§1) ---- */
+function cornerHeight(ix, iz) {
+  const W = G.world;
+  const x = ix - 120, z = iz - 90;
+  // water cuts
+  if (isWaterAt(x, z)) return -0.5;
+  let near = false;
+  for (const [dx, dz] of [[0.9, 0], [-0.9, 0], [0, 0.9], [0, -0.9]]) {
+    if (isWaterAt(x + dx, z + dz)) { near = true; break; }
+  }
+  if (near) return -0.25;
+  // the ridge rises in hand-cut terraces; the trail is cut flat into it
+  if (z < -58) {
+    let h = Math.min(3, (Math.floor((-58 - z) / 5) + 1) * 0.5);
+    const tdx = Math.abs(x - W.trailX), mdx = Math.abs(x - W.marker.x);
+    if ((tdx < 3.5 || mdx < 4.5) && z > -72) h = Math.min(h, 0.25);   // trail cut + marker shelf
+    return h;
+  }
+  // beaches slope a step down
+  if (W.coastal && z > W.oceanZ - 4) return -0.25;
+  // flat play zones
+  const inRect = (r) => x > r.x0 - 2 && x < r.x1 + 2 && z > r.z0 - 2 && z < r.z1 + 2;
+  if (inRect(W.farmRect) || inRect(W.townRect)) return 0;
+  const c = TER.cls && TER.cls[clamp(iz, 0, 179) * 240 + clamp(ix, 0, 239)];
+  if (c === TCLS.PATH || c === TCLS.SAND) return 0;
+  // gentle terraced relief in the wilds: worldgen noise, quantized
+  const cellHash = Math.abs(Math.sin(Math.floor(ix / 7) * 127.1 + Math.floor(iz / 7) * 311.7) * 43758.5);
+  const f = cellHash - Math.floor(cellHash);
+  return f < 0.6 ? 0 : f < 0.85 ? 0.25 : 0.5;
+}
+function terrainHeightAt(x, z) {
+  const ix = clamp(Math.floor(x + 120), 0, 239), iz = clamp(Math.floor(z + 90), 0, 179);
+  const fx = x + 120 - ix, fz = z + 90 - iz;
+  const h00 = cornerHeight(ix, iz), h10 = cornerHeight(ix + 1, iz);
+  const h01 = cornerHeight(ix, iz + 1), h11 = cornerHeight(ix + 1, iz + 1);
+  return lerp(lerp(h00, h10, fx), lerp(h01, h11, fx), fz);
+}
+
+/* ---- the mesh: one indexed BufferGeometry, one draw call ---- */
+function buildTerrainMesh() {
+  classifyTerrain();
+  const MW = 240, MH = 180, T = TER.T;
+  const cls = TER.cls;
+  const pos = new Float32Array(MW * MH * 4 * 3);
+  const uv = new Float32Array(MW * MH * 4 * 2);
+  const col = new Float32Array(MW * MH * 4 * 3);
+  const idx = new Uint32Array(MW * MH * 6);
+  const du = 1 / TER_COLS, dv = 1 / TER_ROWS;
+  const W = G.world;
+  const tileIndexFor = (ix, iz) => {
+    const c = cls[iz * MW + ix];
+    if (c === TCLS.WATER) return T.WATER;
+    if (c === TCLS.WEDGE) return T.WEDGE;
+    if (c === TCLS.SAND) return T.SAND;
+    if (c === TCLS.STONE) return T.STONE;
+    if (c === TCLS.SCRUFF) return T.SCRUFF;
+    if (c === TCLS.PATH) return T.PATH;
+    // grass: transition edge if a path neighbours it, else a random variant
+    const n = (dx, dz) => cls[clamp(iz + dz, 0, MH - 1) * MW + clamp(ix + dx, 0, MW - 1)];
+    if (n(0, -1) === TCLS.PATH) return T.EDGE_N;
+    if (n(1, 0) === TCLS.PATH) return T.EDGE_E;
+    if (n(0, 1) === TCLS.PATH) return T.EDGE_S;
+    if (n(-1, 0) === TCLS.PATH) return T.EDGE_W;
+    const h = Math.abs(Math.sin(ix * 12.99 + iz * 78.23) * 43758.5);
+    return [T.GRASS0, T.GRASS1, T.GRASS2][Math.floor((h - Math.floor(h)) * 3)];
+  };
+  let v = 0, u = 0, ci = 0, ii = 0, vertIndex = 0;
+  for (let iz = 0; iz < MH; iz++) for (let ix = 0; ix < MW; ix++) {
+    const x0 = ix - 120, z0 = iz - 90;
+    const ti = tileIndexFor(ix, iz);
+    const tc = ti % TER_COLS, tr = Math.floor(ti / TER_COLS);
+    const corners = [
+      [x0, cornerHeight(ix, iz), z0],
+      [x0 + 1, cornerHeight(ix + 1, iz), z0],
+      [x0, cornerHeight(ix, iz + 1), z0 + 1],
+      [x0 + 1, cornerHeight(ix + 1, iz + 1), z0 + 1]
+    ];
+    for (const cpt of corners) { pos[v++] = cpt[0]; pos[v++] = cpt[1]; pos[v++] = cpt[2]; }
+    // v flipped: atlas rows top-down
+    const u0 = tc * du, v1 = 1 - tr * dv, v0 = v1 - dv;
+    uv[u++] = u0; uv[u++] = v1;  uv[u++] = u0 + du; uv[u++] = v1;
+    uv[u++] = u0; uv[u++] = v0;  uv[u++] = u0 + du; uv[u++] = v0;
+    // per-vertex warm contact shading (§1): darker near water, cliffs, banks
+    for (let k = 0; k < 4; k++) {
+      const cy = corners[k][1];
+      let shade = 1 - Math.max(0, -cy) * 0.35;         // banks darken toward water
+      if (cy > 0) shade = 1 - cy * 0.06;               // terrace tops slightly cooler
+      const wob = 0.97 + (Math.abs(Math.sin((ix + k) * 91.7 + iz * 47.3) * 10) % 1) * 0.05;
+      shade *= wob;
+      col[ci++] = shade; col[ci++] = shade * 0.995; col[ci++] = shade * 0.97;   // warm, never grey
+    }
+    idx[ii++] = vertIndex; idx[ii++] = vertIndex + 2; idx[ii++] = vertIndex + 1;
+    idx[ii++] = vertIndex + 1; idx[ii++] = vertIndex + 2; idx[ii++] = vertIndex + 3;
+    vertIndex += 4;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.computeVertexNormals();
+  const mat = new THREE.MeshLambertMaterial({ map: TER.atlasTex, vertexColors: true });
+  TER.mesh = new THREE.Mesh(geo, mat);
+  TER.mesh.frustumCulled = false;
+  return TER.mesh;
+}
+function repaintTerrainSeason(season) {
+  if (TER.season === season) return;
+  TER.season = season;
+  buildTerrainAtlas(season);
+}
+/* ============ RENDER: props become sprites (HM64 pass §3) ================ */
+// Trees, fences, the well, mailbox, bench and marker are modeled once, baked
+// under the headlamp light to painted sprites at boot, and drawn as
+// billboards Y-sorted with the characters. Architecture stays true 3D —
+// that geometry/sprite split is the signature look.
+
+const PropBank = {};   // key -> { tex, w, h }  (w/h in world units)
+const SEASON_CANOPY = {
+  Spring: { round: '#6FA85E', pine: '#4E7A55', extra: '#EAD8E4' },
+  Summer: { round: '#4E8A48', pine: '#3E6A48', extra: null },
+  Autumn: { round: '#C08A48', pine: '#5E7A50', extra: '#B3574C' },
+  Winter: { round: '#E8ECE8', pine: '#7A8A80', extra: '#F4F6F4' }
+};
+
+function bakePropSprites(season) {
+  if (!CONFIG.BAKE_SPRITES) return;
+  let rend = null;
+  try {
+    rend = new THREE.WebGLRenderer({ antialias: false, alpha: true, preserveDrawingBuffer: true });
+    rend.setPixelRatio(1);
+    const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 0.78));
+    const dir = new THREE.DirectionalLight(0xfff4e0, 0.55);
+    dir.position.set(0, 2.8, 2.4);
+    scene.add(dir); scene.add(dir.target);
+    dir.target.position.set(0, 0.8, 0);
+    dir.target.updateMatrixWorld();
+    const C = SEASON_CANOPY[season];
+
+    const bake = (key, buildFn, worldW, worldH, px) => {
+      const model = buildFn();
+      scene.add(model);
+      const pw = px || 96;
+      const ph = Math.round(pw * worldH / worldW);
+      rend.setSize(pw, ph, false);
+      const cam = new THREE.OrthographicCamera(-worldW / 2, worldW / 2, worldH, 0, 0.1, 30);
+      cam.position.set(0, 2.8, 6);
+      cam.lookAt(0, worldH * 0.4, 0);
+      rend.setClearColor(0x000000, 0);
+      rend.render(scene, cam);
+      const canvas = document.createElement('canvas');
+      canvas.width = pw; canvas.height = ph;
+      canvas.getContext('2d').drawImage(rend.domElement, 0, 0);
+      quantizeCanvas(canvas, 16);          // CI4 flavor per sprite (§4)
+      scene.remove(model);
+      if (PropBank[key] && PropBank[key].tex) {
+        PropBank[key].tex.image = canvas;
+        PropBank[key].tex.needsUpdate = true;
+        PropBank[key].w = worldW; PropBank[key].h = worldH;
+      } else {
+        PropBank[key] = { tex: nearestTex(canvas), w: worldW, h: worldH };
+      }
+    };
+
+    bake('treeRound', () => {
+      // A cluster of overlapping low-poly blobs, not one icosahedron: from any
+      // bake angle this silhouettes round-and-fluffy rather than a single
+      // sharp apex (an icosahedron's 12-vertex arrangement can project as a
+      // pyramid from a near-frontal camera — the classic low-poly tree trick
+      // is to break the canopy into several smaller lumps instead).
+      const g = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 1.3, 6), lambert('#7d5a3e'));
+      trunk.position.y = 0.65; g.add(trunk);
+      const canMat = lambert(C.round);
+      const lumps = [
+        [0, 2.55, 0, 1.15], [-0.75, 2.15, 0.3, 0.85], [0.8, 2.2, -0.2, 0.85],
+        [0.1, 2.9, -0.5, 0.8], [-0.3, 2.85, 0.5, 0.75]
+      ];
+      for (const [lx, ly, lz, lr] of lumps) {
+        const lump = new THREE.Mesh(new THREE.IcosahedronGeometry(lr, 1), canMat);
+        lump.position.set(lx, ly, lz);
+        g.add(lump);
+      }
+      if (C.extra && season !== 'Winter') {
+        for (let i = 0; i < 5; i++) {
+          const fleck = new THREE.Mesh(new THREE.SphereGeometry(0.14, 5, 4), lambert(C.extra));
+          const a = i / 5 * Math.PI * 2;
+          fleck.position.set(Math.cos(a) * 1.3, 2.4 + Math.sin(a * 2) * 0.7, 0.9 + Math.sin(a) * 0.3);
+          g.add(fleck);
+        }
+      }
+      if (season === 'Winter') {
+        for (const [lx, ly, lz, lr] of lumps) {
+          const snow = new THREE.Mesh(new THREE.IcosahedronGeometry(lr * 1.05, 1), lambert('#F4F6F4'));
+          snow.position.set(lx, ly + lr * 0.35, lz - 0.1);
+          snow.scale.set(1, 0.55, 1);
+          g.add(snow);
+        }
+      }
+      return g;
+    }, 4.0, 4.6);
+
+    bake('treePine', () => {
+      const g = new THREE.Group();
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 1.2, 6), lambert('#6d4e36'));
+      trunk.position.y = 0.6; g.add(trunk);
+      const cone = new THREE.Mesh(new THREE.ConeGeometry(1.5, 3.4, 7), lambert(C.pine));
+      cone.position.y = 2.6; g.add(cone);
+      if (season === 'Winter') {
+        const cap = new THREE.Mesh(new THREE.ConeGeometry(1.0, 1.4, 7), lambert('#F0F4F0'));
+        cap.position.y = 3.6; g.add(cap);
+      }
+      return g;
+    }, 3.4, 4.6);
+
+    bake('well', () => {
+      const g = new THREE.Group();
+      const base = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1, 0.9, 10), lambert(CONFIG.PALETTE.stone));
+      base.position.y = 0.45; g.add(base);
+      for (const px2 of [-0.8, 0.8]) {
+        const post = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.8, 0.15), lambert('#8a6244'));
+        post.position.set(px2, 1.0, 0); g.add(post);
+      }
+      const roof = new THREE.Mesh(new THREE.ConeGeometry(1.2, 0.8, 6), lambert(CONFIG.PALETTE.roofRed));
+      roof.position.y = 2.2; g.add(roof);
+      return g;
+    }, 2.6, 2.8);
+
+    bake('mailbox', () => {
+      const g = new THREE.Group();
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12), lambert('#8a6244'));
+      post.position.y = 0.55; g.add(post);
+      const box = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.4, 0.35), lambert(CONFIG.PALETTE.roofRed));
+      box.position.y = 1.25; g.add(box);
+      return g;
+    }, 1.2, 1.6, 48);
+
+    bake('bench', () => {
+      const g = new THREE.Group();
+      const seat = new THREE.Mesh(new THREE.BoxGeometry(2, 0.12, 0.5), lambert(CONFIG.PALETTE.wood));
+      seat.position.y = 0.5; g.add(seat);
+      const back = new THREE.Mesh(new THREE.BoxGeometry(2, 0.5, 0.1), lambert(CONFIG.PALETTE.wood));
+      back.position.set(0, 0.85, -0.22); g.add(back);
+      for (const lx of [-0.8, 0.8]) {
+        const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.4), lambert('#8a6244'));
+        leg.position.set(lx, 0.25, 0); g.add(leg);
+      }
+      return g;
+    }, 2.4, 1.3, 72);
+
+    bake('marker', () => {
+      const g = new THREE.Group();
+      const stone = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.6, 0.5), lambert(CONFIG.PALETTE.stone));
+      stone.position.y = 0.8; g.add(stone);
+      const ledge = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.18, 0.9), lambert('#8C8C84'));
+      ledge.position.set(0, 0.5, 0.45); g.add(ledge);
+      return g;
+    }, 1.6, 1.9, 56);
+
+    bake('fencepost', () => {
+      const post = new THREE.Mesh(new THREE.BoxGeometry(0.18, 1.0, 0.18), lambert('#8a6244'));
+      post.position.y = 0.5;
+      return post;
+    }, 0.4, 1.1, 16);
+  } catch (e) {
+    console.warn('prop bake failed; keeping 3D props', e);
+  } finally {
+    if (rend) rend.dispose();
+  }
+}
+
+// Billboard orientation is constant (fixed camera yaw + pitch): one shared quaternion.
+function billboardQuat() {
+  return R.camera.quaternion;
+}
+function makePropSprite(key, x, z, scale) {
+  const p = PropBank[key];
+  if (!p) return null;
+  const s = scale || 1;
+  const quad = new THREE.Mesh(new THREE.PlaneGeometry(p.w * s, p.h * s),
+    new THREE.MeshBasicMaterial({ map: p.tex, transparent: true, alphaTest: 0.4 }));
+  const g = new THREE.Group();
+  quad.position.y = p.h * s * 0.5;
+  quad.quaternion.copy(billboardQuat());
+  g.add(quad);
+  g.position.set(x, terrainHeightAt(x, z), z);
+  g.userData.propQuad = quad;
+  return g;
+}
+
+/* ---- crops as painted sprite stages (§3) ---- */
+const CropSprites = {};   // cropId -> [stage0..stage3] textures, plus 'dead'
+function paintCropSprites() {
+  const mk = painter => {
+    const c = document.createElement('canvas');
+    c.width = 24; c.height = 24;
+    painter(c.getContext('2d'));
+    quantizeCanvas(c, 12);
+    return nearestTex(c);
+  };
+  const hexOf = n => '#' + n.toString(16).padStart(6, '0');
+  CropSprites.stage0 = mk(c => {   // shared seed mound
+    c.fillStyle = '#6B8A55';
+    c.fillRect(10, 18, 4, 4);
+    c.fillRect(11, 16, 2, 2);
+  });
+  CropSprites.stage1 = mk(c => {   // shared sprout
+    c.strokeStyle = '#5E8A55'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(12, 22); c.lineTo(12, 14); c.stroke();
+    c.beginPath(); c.moveTo(12, 16); c.lineTo(8, 12); c.moveTo(12, 16); c.lineTo(16, 12); c.stroke();
+  });
+  CropSprites.dead = mk(c => {     // the reaper's leavings — a withered stalk
+    c.strokeStyle = '#8C8474'; c.lineWidth = 2;
+    c.beginPath(); c.moveTo(12, 22); c.lineTo(10, 12); c.stroke();
+    c.beginPath(); c.moveTo(11, 16); c.lineTo(7, 14); c.stroke();
+    c.fillStyle = '#7A7466'; c.fillRect(9, 10, 3, 2);
+  });
+  for (const id in CONFIG.CROPS) {
+    const color = hexOf(CONFIG.CROPS[id].color);
+    CropSprites['mid_' + id] = mk(c => {     // leafy adolescent
+      c.fillStyle = '#4E7A48';
+      c.beginPath(); c.ellipse(12, 15, 7, 5, 0, 0, 7); c.fill();
+      c.fillStyle = '#5E8A55';
+      c.beginPath(); c.ellipse(9, 12, 4, 3, 0, 0, 7); c.ellipse(16, 13, 4, 3, 0, 0, 7); c.fill();
+      c.strokeStyle = '#3E6A3E'; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(12, 22); c.lineTo(12, 16); c.stroke();
+    });
+    CropSprites['ripe_' + id] = mk(c => {    // mature, fruit showing
+      c.fillStyle = '#4E7A48';
+      c.beginPath(); c.ellipse(12, 13, 8, 5, 0, 0, 7); c.fill();
+      c.strokeStyle = '#3E6A3E'; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(12, 22); c.lineTo(12, 14); c.stroke();
+      c.fillStyle = color;
+      c.beginPath(); c.arc(9, 16, 3.4, 0, 7); c.arc(16, 15, 3, 0, 7); c.fill();
+      c.fillStyle = 'rgba(255,255,255,0.35)';
+      c.fillRect(8, 14, 2, 1); c.fillRect(15, 13, 2, 1);
+    });
+  }
+}
 /* ========================= RENDER: scene build =========================== */
 const R = {
   renderer: null, scene: null, camera: null, ambient: null, dir: null,
@@ -1013,15 +1596,14 @@ function buildWorldScene() {
   R.windowMeshes = [];
   const WG = R.worldGroup;
 
-  // ground + water overlay
-  paintGround(seasonOf(G.day));
-  const ground = new THREE.Mesh(new THREE.PlaneGeometry(240, 180),
-    new THREE.MeshLambertMaterial({ map: GROUND.tex }));
-  ground.rotation.x = -Math.PI / 2; WG.add(ground);
+  // HM64 pass §1: true tile-mesh terrain — one draw call, per-tile atlas UVs,
+  // quantized corner heights, per-vertex warm contact shading
+  repaintTerrainSeason(seasonOf(G.day));
+  WG.add(buildTerrainMesh());
   buildWaterFrames();
   const waterM = new THREE.Mesh(new THREE.PlaneGeometry(240, 180),
     new THREE.MeshBasicMaterial({ map: WATER.tex, transparent: true, depthWrite: false }));
-  waterM.rotation.x = -Math.PI / 2; waterM.position.y = 0.02; WG.add(waterM);
+  waterM.rotation.x = -Math.PI / 2; waterM.position.y = -0.34; WG.add(waterM);
 
   W.doors = [];
   // farmhouse
@@ -1071,17 +1653,9 @@ function buildWorldScene() {
   gz.position.set(W.gazebo.x, 0, W.gazebo.z); WG.add(gz);
   addBlob(WG, W.gazebo.x, W.gazebo.z, 8, 0.4);
 
-  // well
-  const well = new THREE.Group();
-  const wellBase = new THREE.Mesh(new THREE.CylinderGeometry(0.9, 1, 0.9, 10), MAT.stone);
-  wellBase.position.y = 0.45; well.add(wellBase);
-  const wellRoof = new THREE.Mesh(new THREE.ConeGeometry(1.2, 0.8, 6), MAT.roofRed);
-  wellRoof.position.y = 2.2; well.add(wellRoof);
-  for (const px of [-0.8, 0.8]) {
-    const post = new THREE.Mesh(new THREE.BoxGeometry(0.15, 1.8, 0.15), MAT.woodDark);
-    post.position.set(px, 1.0, 0); well.add(post);
-  }
-  well.position.set(W.well.x, 0, W.well.z); WG.add(well);
+  // well — prop sprite (§3), 3D fallback if the bake failed
+  const wellSpr = makePropSprite('well', W.well.x, W.well.z);
+  if (wellSpr) WG.add(wellSpr);
   addBlob(WG, W.well.x, W.well.z, 2.6, 0.5);
   G.world.circles.push({ x: W.well.x, z: W.well.z, r: 1.1 });
 
@@ -1095,13 +1669,9 @@ function buildWorldScene() {
   addBlob(WG, W.bin.x, W.bin.z, 2.6, 0.5);
   registerBox(W.bin.x, W.bin.z, 1.1, 0.8);
 
-  // mailbox on a post
-  const mb = new THREE.Group();
-  const mpost = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.1, 0.12), MAT.woodDark);
-  mpost.position.y = 0.55; mb.add(mpost);
-  const mboxm = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.4, 0.35), MAT.roofRed);
-  mboxm.position.y = 1.25; mb.add(mboxm);
-  mb.position.set(W.mailbox.x, 0, W.mailbox.z); WG.add(mb);
+  // mailbox on a post — prop sprite (§3)
+  const mbSpr = makePropSprite('mailbox', W.mailbox.x, W.mailbox.z);
+  if (mbSpr) WG.add(mbSpr);
   R.mailFlag = new THREE.Mesh(new THREE.PlaneGeometry(0.3, 0.3),
     new THREE.MeshBasicMaterial({ map: emojiTex('✉'), transparent: true }));
   R.mailFlag.position.set(W.mailbox.x, 1.75, W.mailbox.z); R.mailFlag.visible = false;
@@ -1116,11 +1686,18 @@ function buildWorldScene() {
     posts.push([fx0, z]);
     if (Math.abs(z - W.pathZ) > 2.2) posts.push([fx1, z]);
   }
-  const postGeo = new THREE.BoxGeometry(0.18, 1.0, 0.18);
-  const postIM = new THREE.InstancedMesh(postGeo, MAT.woodDark, posts.length);
   const dummy = new THREE.Object3D();
+  const fp = PropBank.fencepost;
+  const postIM = fp
+    ? new THREE.InstancedMesh(new THREE.PlaneGeometry(fp.w, fp.h),
+        new THREE.MeshBasicMaterial({ map: fp.tex, transparent: true, alphaTest: 0.4 }), posts.length)
+    : new THREE.InstancedMesh(new THREE.BoxGeometry(0.18, 1.0, 0.18), MAT.woodDark, posts.length);
   posts.forEach((p, i) => {
-    dummy.position.set(p[0], 0.5, p[1]); dummy.rotation.set(0, 0, 0); dummy.updateMatrix();
+    const y = terrainHeightAt(p[0], p[1]);
+    dummy.position.set(p[0], y + (fp ? fp.h / 2 : 0.5), p[1]);
+    if (fp) dummy.quaternion.copy(billboardQuat());
+    else dummy.rotation.set(0, 0, 0);
+    dummy.updateMatrix();
     postIM.setMatrixAt(i, dummy.matrix);
   });
   WG.add(postIM);
@@ -1135,23 +1712,11 @@ function buildWorldScene() {
   bridge.position.set(W.bridge.x, 0.1, W.pathZ); WG.add(bridge);
   const dock = new THREE.Mesh(new THREE.BoxGeometry(2, 0.2, 5), MAT.woodDark);
   dock.position.set(W.dock.x, 0.15, W.dock.z + 2); WG.add(dock);
-  const bench = new THREE.Group();
-  const seat = new THREE.Mesh(new THREE.BoxGeometry(2, 0.12, 0.5), MAT.wood);
-  seat.position.y = 0.5; bench.add(seat);
-  const back = new THREE.Mesh(new THREE.BoxGeometry(2, 0.5, 0.1), MAT.wood);
-  back.position.set(0, 0.85, -0.22); bench.add(back);
-  for (const lx of [-0.8, 0.8]) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.12, 0.5, 0.4), MAT.woodDark);
-    leg.position.set(lx, 0.25, 0); bench.add(leg);
-  }
-  bench.position.set(W.bench.x, 0, W.bench.z); WG.add(bench);
+  const benchSpr = makePropSprite('bench', W.bench.x, W.bench.z);
+  if (benchSpr) WG.add(benchSpr);
   addBlob(WG, W.bench.x, W.bench.z, 2.4, 0.45);
-  const marker = new THREE.Group();
-  const mstone = new THREE.Mesh(new THREE.BoxGeometry(0.9, 1.6, 0.5), MAT.stone);
-  mstone.position.y = 0.8; marker.add(mstone);
-  const ledge = new THREE.Mesh(new THREE.BoxGeometry(1.3, 0.18, 0.9), MAT.stone);
-  ledge.position.set(0, 0.5, 0.6); marker.add(ledge);
-  marker.position.set(W.marker.x, 0, W.marker.z); WG.add(marker);
+  const markerSpr = makePropSprite('marker', W.marker.x, W.marker.z);
+  if (markerSpr) WG.add(markerSpr);
   addBlob(WG, W.marker.x, W.marker.z, 2.2, 0.5);
   G.world.circles.push({ x: W.marker.x, z: W.marker.z, r: 0.9 });
 
@@ -1195,28 +1760,31 @@ function buildWorldScene() {
     WG.add(cap);
   }
 
-  // trees: instanced trunks + canopies
+  // trees: instanced billboard sprites, per-season repaints (§3, §5)
   const trees = W.trees;
-  const trunkIM = new THREE.InstancedMesh(new THREE.CylinderGeometry(0.22, 0.3, 1.4, 6), MAT.trunk, trees.length);
   const rounds = trees.filter(t => t.kind === 'round');
   const pines = trees.filter(t => t.kind === 'pine');
-  const roundIM = new THREE.InstancedMesh(new THREE.IcosahedronGeometry(1.7, 0), MAT.canopy, Math.max(1, rounds.length));
-  const pineIM = new THREE.InstancedMesh(new THREE.ConeGeometry(1.5, 3.4, 7), MAT.pine, Math.max(1, pines.length));
-  trees.forEach((t, i) => {
-    dummy.position.set(t.x, 0.7 * t.s, t.z); dummy.scale.set(t.s, t.s, t.s);
-    dummy.rotation.set(0, 0, 0); dummy.updateMatrix();
-    trunkIM.setMatrixAt(i, dummy.matrix);
-  });
-  rounds.forEach((t, i) => {
-    dummy.position.set(t.x, 2.3 * t.s, t.z); dummy.scale.set(t.s, t.s, t.s); dummy.updateMatrix();
-    roundIM.setMatrixAt(i, dummy.matrix);
-  });
-  pines.forEach((t, i) => {
-    dummy.position.set(t.x, 2.6 * t.s, t.z); dummy.scale.set(t.s, t.s, t.s); dummy.updateMatrix();
-    pineIM.setMatrixAt(i, dummy.matrix);
-  });
-  WG.add(trunkIM); WG.add(roundIM); WG.add(pineIM);
-  R.canopyMats = [MAT.canopy, MAT.pine];
+  const mkTreeIM = (key, list) => {
+    const pb = PropBank[key];
+    if (!pb) return null;
+    const im = new THREE.InstancedMesh(new THREE.PlaneGeometry(pb.w, pb.h),
+      new THREE.MeshBasicMaterial({ map: pb.tex, transparent: true, alphaTest: 0.4 }),
+      Math.max(1, list.length));
+    list.forEach((t, i) => {
+      dummy.position.set(t.x, terrainHeightAt(t.x, t.z) + pb.h * t.s * 0.5, t.z);
+      dummy.scale.set(t.s, t.s, t.s);
+      dummy.quaternion.copy(billboardQuat());
+      dummy.updateMatrix();
+      im.setMatrixAt(i, dummy.matrix);
+    });
+    im.count = list.length;
+    im.frustumCulled = false;
+    return im;
+  };
+  const roundIM = mkTreeIM('treeRound', rounds);
+  const pineIM = mkTreeIM('treePine', pines);
+  if (roundIM) WG.add(roundIM);
+  if (pineIM) WG.add(pineIM);
   for (const t of trees) addBlob(WG, t.x, t.z, 3.4 * t.s, 0.45);
 
   // target highlight quad
@@ -1259,13 +1827,15 @@ function buildTileLayers(parent) {
   mk('boulder', new THREE.DodecahedronGeometry(0.62, 0), MAT.stone);
   mk('log', new THREE.CylinderGeometry(0.3, 0.3, 1.4, 8), MAT.trunk);
   mk('sprinkler', new THREE.CylinderGeometry(0.1, 0.16, 0.5, 6), lambert('#8C9499'));
-  mk('dead', new THREE.ConeGeometry(0.16, 0.4, 5), lambert('#8C8474'));
-  const sproutMat = lambert('#5E8A55');
-  mk('crop0', new THREE.SphereGeometry(0.08, 6, 5), sproutMat);
-  mk('crop1', new THREE.ConeGeometry(0.13, 0.38, 6), sproutMat);
-  mk('crop2', new THREE.ConeGeometry(0.18, 0.6, 6), lambert('#4E7A48'));
+  // crops are painted sprite stages, billboarded like everything alive (§3)
+  const cropQuad = new THREE.PlaneGeometry(0.85, 0.85);
+  const sprMat = tex => new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.4 });
+  mk('dead', cropQuad, sprMat(CropSprites.dead));
+  mk('crop0', cropQuad, sprMat(CropSprites.stage0));
+  mk('crop1', cropQuad, sprMat(CropSprites.stage1));
   for (const id in CONFIG.CROPS) {
-    mk('ripe_' + id, new THREE.SphereGeometry(0.24, 8, 6), lambert(CONFIG.CROPS[id].color));
+    mk('mid_' + id, cropQuad, sprMat(CropSprites['mid_' + id]));
+    mk('ripe_' + id, cropQuad, sprMat(CropSprites['ripe_' + id]));
   }
 }
 const tlDummy = new THREE.Object3D();
@@ -1274,12 +1844,18 @@ function rebuildTiles() {
   TL.dirty = false;
   const W = G.world, f = W.field;
   const counts = {};
+  const isSprite = layer => layer === 'dead' || layer.startsWith('crop') ||
+    layer.startsWith('mid_') || layer.startsWith('ripe_');
   const put = (layer, x, y, z, ry) => {
     const im = TL.layers[layer];
+    if (!im) return;
     const i = counts[layer] = (counts[layer] || 0);
     tlDummy.position.set(x, y, z);
-    tlDummy.rotation.set(layer === 'clear' || layer === 'till' || layer === 'water' ? -Math.PI / 2 : 0, ry || 0, 0);
-    if (layer === 'log') tlDummy.rotation.set(0, 0.4, Math.PI / 2);
+    if (isSprite(layer)) tlDummy.quaternion.copy(billboardQuat());
+    else {
+      tlDummy.rotation.set(layer === 'clear' || layer === 'till' || layer === 'water' ? -Math.PI / 2 : 0, ry || 0, 0);
+      if (layer === 'log') tlDummy.rotation.set(0, 0.4, Math.PI / 2);
+    }
     tlDummy.scale.set(1, 1, 1);
     tlDummy.updateMatrix();
     im.setMatrixAt(i, tlDummy.matrix);
@@ -1294,10 +1870,11 @@ function rebuildTiles() {
     else if (t.obj) put(t.obj, x, t.obj === 'rock' ? 0.2 : 0.25, z);
     if (t.crop && !t.dead) {
       const vs = cropVisualStage(t);
-      if (vs === 3) put('ripe_' + t.crop, x, 0.3, z);
-      else put('crop' + vs, x, vs === 0 ? 0.08 : 0.2, z);
+      if (vs === 3) put('ripe_' + t.crop, x, 0.42, z);
+      else if (vs === 2) put('mid_' + t.crop, x, 0.42, z);
+      else put('crop' + vs, x, 0.42, z);
     }
-    if (t.crop && t.dead) put('dead', x, 0.2, z);
+    if (t.crop && t.dead) put('dead', x, 0.42, z);
   }
   for (const name in TL.layers) {
     TL.layers[name].count = counts[name] || 0;
@@ -1333,7 +1910,7 @@ function spawnForage() {
       new THREE.MeshBasicMaterial({ map: emojiTex(f.item.icon), transparent: true }));
     sprite.position.y = 0.35; g.add(sprite);
     addBlob(g, 0, 0, 0.9, 0.6);
-    g.position.set(f.x, 0, f.z);
+    g.position.set(f.x, terrainHeightAt(f.x, f.z), f.z);
     R.worldGroup.add(g);
     FORAGE_LIVE.push({ x: f.x, z: f.z, item: f.item, mesh: g, sprite });
   }
@@ -1409,11 +1986,13 @@ function applyGrade() {
     R.scene.background.set(P.skyNight);
   }
   R.scene.fog.color.copy(R.scene.background);
-  // NIGHTTIME mostly *sounds* like night (§1): the overworld loop stops
-  if (typeof MUS !== 'undefined' && !MUS.jukeboxUntil) {
+  // NIGHTTIME mostly *sounds* like night (§1/§6): the loop thins to a sparse
+  // night arrangement after dark instead of playing the day mix
+  if (typeof MUS !== 'undefined' && !MUS.jukeboxUntil && G.mode === 'play') {
+    const wantSparse = phase === 'night';
     const seasonLoop = MUS.current && !TRACKS[MUS.current].juke;
-    if (phase === 'night' && seasonLoop) stopMusic();
-    else if (phase !== 'night' && !MUS.current && G.mode === 'play') startSeasonMusic();
+    if (seasonLoop && MUS.sparse !== wantSparse) startSeasonMusic(wantSparse);
+    else if (!MUS.current) startSeasonMusic(wantSparse);
   }
   // windows go emissive by texture swap at dusk
   const lit = phase !== 'day';
@@ -1500,9 +2079,11 @@ function makeActor(id, rec, x, z) {
   let sprite = null;
   const bank = (typeof SpriteBank !== 'undefined') && SpriteBank[id];
   if (bank) {
-    const quad = new THREE.Mesh(new THREE.PlaneGeometry(1.16, 1.74),
+    // §2: locked so a standing character reads ~56-64px on the 640-wide buffer
+    // at the ~28-32px/tile zoom (2x the original's 320-wide/~28-32px chars).
+    const quad = new THREE.Mesh(new THREE.PlaneGeometry(1.34, 2.0),
       new THREE.MeshBasicMaterial({ map: bank.tex, transparent: true, alphaTest: 0.4 }));
-    quad.position.y = 0.84;
+    quad.position.y = 0.96;
     group.add(quad);
     sprite = { quad, tex: bank.tex };
   } else {
@@ -1525,7 +2106,9 @@ function removeActor(id) {
   if (a) { R.scene.remove(a.group); delete ACTORS[id]; }
 }
 function actorSetPos(a, x, z) {
-  a.x = x; a.z = z; a.group.position.set(x, 0, z);
+  a.x = x; a.z = z;
+  a.baseY = terrainHeightAt(x, z);
+  a.group.position.set(x, a.baseY, z);
   if (a.id === 'player') updateCamera(x, z, true);
 }
 
@@ -1551,7 +2134,8 @@ function moveActor(a, dx, dz, dt) {
   const nz = a.z + dz * a.speed * dt;
   if (positionFree(a.x, nz, a)) { a.z = nz; moved = true; }
   if (dx || dz) a.face = Math.atan2(dx, dz);
-  a.group.position.set(a.x, a.group.position.y, a.z);
+  a.baseY = terrainHeightAt(a.x, a.z);
+  a.group.position.set(a.x, a.baseY + (a.hopY || 0), a.z);
   if (!a.sprite) a.group.rotation.y = a.face;   // billboards keep camera-facing
   return moved;
 }
@@ -1573,8 +2157,9 @@ function tickActorAnim(a, dt, walking) {
   a.group.rotation.x = slump * 0.5;
   if (a.hopT > 0) {                    // tool-use hop
     a.hopT -= dt;
-    a.group.position.y = Math.max(0, Math.sin((1 - a.hopT / 0.18) * Math.PI) * 0.16);
-    if (a.hopT <= 0) a.group.position.y = 0;
+    a.hopY = Math.max(0, Math.sin((1 - a.hopT / 0.18) * Math.PI) * 0.16);
+    if (a.hopT <= 0) a.hopY = 0;
+    a.group.position.y = (a.baseY || 0) + a.hopY;
   }
 }
 // NPC waypoint walking (interpolated, never teleports)
@@ -1968,20 +2553,27 @@ function dirIndexFromFace(face) {
   return Math.round(((face % tau) + tau) % tau / (Math.PI / 4)) % 8;
 }
 
+// Animation timing in 30fps ticks with authored, slightly uneven per-frame
+// durations (§7): the walk holds 7,8,7,8 ticks — the toy-like signature.
+const WALK_TICKS = [7, 8, 7, 8];
 function updateSpriteFrame(a, walking, dt) {
   const s = a.sprite;
   // billboard: face the (fixed-yaw) camera
   s.quad.quaternion.copy(R.camera.quaternion);
   if (walking) {
-    a.animT += dt;
-    if (a.animT > 0.125) { a.animT = 0; a.animFrame = (a.animFrame + 1) % 4; }
-  } else a.animFrame = 0;
+    a.animT += dt * 30;                    // ticks
+    if (a.animT >= WALK_TICKS[a.animFrame]) {
+      a.animT = 0;
+      a.animFrame = (a.animFrame + 1) % 4;
+    }
+  } else { a.animFrame = 0; a.animT = 0; }
   let col = [0, 1, 0, 2][a.animFrame];
   if (a.hopT > 0) {
     a.hopT -= dt;
     col = 3;
-    a.group.position.y = Math.max(0, Math.sin((1 - a.hopT / 0.18) * Math.PI) * 0.16);
-    if (a.hopT <= 0) a.group.position.y = 0;
+    a.hopY = Math.max(0, Math.sin((1 - a.hopT / 0.18) * Math.PI) * 0.16);
+    if (a.hopT <= 0) a.hopY = 0;
+    a.group.position.y = (a.baseY || 0) + a.hopY;
   }
   const row = dirIndexFromFace(a.face);
   // atlas row 0 is direction 0 at the TOP of the canvas; UV v runs bottom-up
@@ -2273,7 +2865,10 @@ function rollover(newDay) {
   G.fatigue = clamp((G.fatigue || 0) - (G.collapsedYesterday ? 15 : 40), 0, 100);
   G.flags.staminaTier = -1;
   G.collapsedYesterday = false;
-  if (seasonChanged) { paintGround(seasonOf(newDay)); }
+  if (seasonChanged) {
+    repaintTerrainSeason(seasonOf(newDay));
+    if (typeof bakePropSprites === 'function') bakePropSprites(seasonOf(newDay));
+  }
   TL.dirty = true;
   // 10. autosave (in-memory slot)
   G.autosave = saveEncode();
@@ -2527,6 +3122,7 @@ function applySave(data) {
   G.maxStaminaBonus = data.staminaBonus || 0;
   G.weather = weatherFor(G.day);
   location.hash = '#s=' + data.seed;
+  bakePropSprites(seasonOf(G.day));
   buildWorldScene();
   for (const id in ACTORS) removeActor(id);
   bakeAllSprites();
@@ -3759,7 +4355,7 @@ function computeForecast() {
 /* ================= AUDIO: music engine (phase 3, all synth) ============== */
 // A tiny 16-step sequencer. All tracks original; the jukebox evokes 90s
 // country as a genre — twangy lead, walking bass, train-beat brushes (§15).
-const MUS = { current: null, timer: null, step: 0, vol: 0.30, jukeboxUntil: 0 };
+const MUS = { current: null, timer: null, step: 0, vol: 0.30, jukeboxUntil: 0, sparse: false };
 function nf(n) { return n ? 440 * Math.pow(2, (n - 69) / 12) : 0; }
 function mvoice(freq, dur, type, vol) {
   const ctx = audioCtx();
@@ -3809,6 +4405,14 @@ function playTrack(name) {
     if (AU.vol <= 0) return;
     const i = MUS.step % 16;
     const juke = tr.juke;
+    if (MUS.sparse && !juke) {
+      // night: bass breathing, the lead only surfacing now and then
+      if (i % 4 === 0) mvoice(nf(tr.bass[i]), stepMs / 1000 * 2.4, tr.bassType, 0.2);
+      if (i === 0 || i === 10) mvoice(nf(tr.lead[i] || tr.lead[0]), stepMs / 1000 * 3, 'sine', 0.08);
+      MUS.step++;
+      if (MUS.jukeboxUntil && Date.now() > MUS.jukeboxUntil) startSeasonMusic();
+      return;
+    }
     mvoice(nf(tr.bass[i]), stepMs / 1000 * 1.8, tr.bassType, juke ? 0.5 : 0.32);
     mvoice(nf(tr.lead[i]), stepMs / 1000 * (juke ? 1.2 : 2.2), tr.leadType, juke ? 0.22 : 0.16);
     if (juke && i % 4 === 2) mvoice(2400 + (i % 8) * 60, 0.03, 'square', 0.05);  // brush tick
@@ -3820,11 +4424,13 @@ function stopMusic() {
   clearInterval(MUS.timer);
   MUS.timer = null; MUS.current = null;
 }
-function startSeasonMusic() {
+function startSeasonMusic(sparse) {
   MUS.jukeboxUntil = 0;
+  MUS.sparse = !!sparse;
   playTrack(seasonOf(G.day).toLowerCase());
 }
 function playJukebox(id) {
+  MUS.sparse = false;
   MUS.jukeboxUntil = Date.now() + 40000;   // one "spin", then back to the season
   sfx('coin');
   playTrack(id);
@@ -4230,9 +4836,40 @@ function drawPortrait(rec) {
 }
 
 /* ---- dialogue (typewriter + blip) ---- */
+// HM64 box metric (§8): ~3 lines × ~28 chars, one thought per box. Long lines
+// split at sentence boundaries into successive boxes.
+const BOX_CHARS = 84;
+function boxify(text) {
+  if (text.length <= BOX_CHARS + 8) return [text];
+  const parts = text.match(/[^.!?…]+[.!?…]+["»)\u2019]*\s*|.+$/g) || [text];
+  const out = [];
+  let cur = '';
+  for (const s of parts) {
+    if ((cur + s).length > BOX_CHARS && cur) { out.push(cur.trim()); cur = s; }
+    else cur += s;
+  }
+  if (cur.trim()) out.push(cur.trim());
+  return out.flatMap(t => {
+    if (t.length <= BOX_CHARS + 12) return [t];
+    const words = t.split(' ');
+    const chunks = [];
+    let c = '';
+    for (const w of words) {
+      if ((c + ' ' + w).length > BOX_CHARS && c) { chunks.push(c); c = w; }
+      else c = c ? c + ' ' + w : w;
+    }
+    if (c) chunks.push(c);
+    return chunks;
+  });
+}
 const DLG = { queue: [], active: false, revealing: false, txt: '', shown: 0, cb: null, timer: null };
 function say(lines, cb) {
-  for (const l of lines) DLG.queue.push(typeof l === 'string' ? { who: '', text: l } : l);
+  for (const l of lines) {
+    const entry = typeof l === 'string' ? { who: '', text: l } : l;
+    for (const chunk of boxify(entry.text)) {
+      DLG.queue.push({ who: entry.who, text: chunk, mood: entry.mood });
+    }
+  }
   DLG.cb = cb || DLG.cb;
   if (!DLG.active) nextDialogue();
 }
@@ -5689,8 +6326,9 @@ const STORY = {
 
 function startNewGame() {
   if (!G.world) G.world = generateWorld(TITLE.seed || 1234567);
-  buildWorldScene();
   buildItems();
+  bakePropSprites(seasonOf(CONFIG.START_DAY));
+  buildWorldScene();
   bakeAllSprites();
   const W = G.world;
   G.day = CONFIG.START_DAY;
@@ -5759,6 +6397,10 @@ function boot() {
   buildMaterials();
   buildItems();
   initThree();
+  // orient the camera once so billboard quaternions are final before any bake
+  R.camera.position.set(0, CONFIG.CAM_OFFSET.y, CONFIG.CAM_OFFSET.z);
+  R.camera.lookAt(0, 0, 0);
+  paintCropSprites();
   initTouch();
   layout();
   TITLE.show();
