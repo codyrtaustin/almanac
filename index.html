@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>ALMANAC</title>
 <!--
-  ALMANAC — Phases 1+2: The Farm & The Year / The Town
-  Built against SPEC.md v1.0. Single file, Three.js r128, no storage APIs.
+  ALMANAC — Phases 1–4: complete build against SPEC.md v1.0.
+  Single file, Three.js r128, no storage APIs.
 
   DESIGN DECISIONS (unspecified in spec, chosen per pillars):
   - Characters are baked at boot into sprite atlases (8 directions x 4 poses:
@@ -29,9 +29,25 @@
     errand in 3-minute winter days); Hetta's letter keeps it diegetic.
   - Ledger profit chips show last season's tagged income per crop (seed costs are
     tagged Supplies, not per-crop, so "profit" = earnings; label reads as such).
-  - Weather set: sun / cloud / rain / snow. Fishing + festivals x4 land in ph.3.
+  - Weather set: sun / cloud / rain / snow.
   - Free turnip packet covers the 6x6 starter patch (36 seeds). Turnip check $216;
     the winter coat is $120 and starting cash $40 so the day-4 squeeze always bites.
+  PHASE 3-4 DECISIONS:
+  - Contract eligibility is hearts >= 6 + business connected; the spec's "received
+    the relevant good a few times" is expressed through the hearts road there.
+  - Cows/barn are scope-gated out (spec allows); chickens ship: coop + Greta's
+    hens, an egg per hen at rollover, feeding Maren's contract.
+  - The fox payoff plays as an authored overlook scene behind a fade rather than
+    a live 90-degree camera snap (the only spot the spec allows one; the fixed
+    rig everywhere else made a one-off snap read as a glitch in testing).
+  - Tavern-door low-pass music leak omitted; the jukebox plays full inside via
+    the door menu. Four original tracks; "Checks in the Mail" retires at stage 3.
+  - Old Ness's refusal: zero mechanical penalty, +1 heart for the honesty, and
+    his bait-worm contract pays cash in person on Restdays, always.
+  - The Restday tavern keeps its own hours (shut days, open from dusk) per §5.
+  - Blessings from the marker are never announced: doubled forage, an instant
+    bite, or a rested morning, drawn from the calendar stream; the Journal only
+    ever "notices."
   - Debug hooks exposed on window.ALMANAC for acceptance testing (harmless in play).
 -->
 <style>
@@ -1271,7 +1287,23 @@ const FORAGE_LIVE = [];
 function spawnForage() {
   for (const fmesh of FORAGE_LIVE) R.worldGroup.remove(fmesh.mesh);
   FORAGE_LIVE.length = 0;
-  for (const f of forageForDay(G.day)) {
+  let spots = forageForDay(G.day);
+  // an unannounced blessing: the valley doubles its gifts today (§13)
+  if (G.flags.blessForage) {
+    G.flags.blessForage = false;
+    spots = spots.concat(forageForDay(G.day ^ 0x77).map(f => ({ x: f.x + 2, z: f.z + 2, item: f.item })));
+    jline('The woods were strangely generous today. I have a guess why, and I’m not writing it down.');
+  }
+  // rain brings worms up along the paths (Ness’s trade)
+  if (G.weather === 'rain' && typeof CONTRACT_DEFS !== 'undefined') {
+    ITEMS.worm = ITEMS.worm || { name: 'Bait Worm', icon: '🪱', sell: 3, enterprise: 'Fishing' };
+    const cal = calendarDay(G.day ^ 0x3AB).r;
+    for (let i = 0; i < 3; i++) {
+      const sp = G.world.forageSpots[Math.floor(cal() * G.world.forageSpots.length)];
+      if (sp) spots.push({ x: sp.x + 1, z: sp.z - 1, item: { id: 'worm', name: 'Bait Worm', icon: '🪱', sell: 3 } });
+    }
+  }
+  for (const f of spots) {
     if (G.dayFlags['picked_' + Math.round(f.x) + '_' + Math.round(f.z)]) continue;
     const g = new THREE.Group();
     const sprite = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.7),
@@ -1576,6 +1608,8 @@ function findAction() {
   for (const f of FORAGE_LIVE) {
     if (dist2(p.x, p.z, f.x, f.z) < 2.6) return { type: 'forage', f };
   }
+  // the ridge marker's offering ledge
+  if (dist2(p.x, p.z, W.marker.x, W.marker.z) < 7) return { type: 'marker' };
   // bin / mailbox / doors
   if (dist2(p.x, p.z, W.bin.x, W.bin.z) < 4.4) return { type: 'bin' };
   if (dist2(p.x, p.z, W.mailbox.x, W.mailbox.z) < 3.2) return { type: 'mail' };
@@ -1696,6 +1730,14 @@ function scheduleFor(id, day) {
       ];
     case 'rolf':
       // Pre-conversion: shoebox evenings at home, no tavern (§11 stage 0).
+      // Post-stage-5: his evenings — and his Bluebird stool — come back.
+      if ((G.network.stage || 0) >= 5) return [
+        { t: 6.5, at: 'rolfField' },
+        { t: 12.5, at: 'ranch', leisure: true },
+        { t: 13.5, at: 'rolfField' },
+        { t: 18, at: 'tavern', leisure: true },
+        { t: 21.5, at: 'rolfField', inside: true }
+      ];
       return [
         { t: 6.5, at: 'rolfField' },
         { t: 12.5, at: 'ranch', leisure: true },
@@ -1735,6 +1777,17 @@ function scheduleFor(id, day) {
         { t: 18, at: 'home2', inside: true }
       ];
     case 'sable': {
+      // Paired (post-Starlight Y2): weeknight evenings at the Bluebird, with him.
+      if (G.flags.romancePaired && !rest) {
+        const r0 = calendarDay(day ^ 0x5AB1E).r;
+        const spots0 = ['bridge', 'trailMid', 'forestA', 'shorePath'];
+        return [
+          { t: 8, at: spots0[Math.floor(r0() * spots0.length)], leisure: true },
+          { t: 13, at: spots0[Math.floor(r0() * spots0.length)], leisure: true },
+          { t: 18, at: 'tavern', leisure: true },
+          { t: 21.5, at: 'bridge', inside: true }
+        ];
+      }
       if (rest) return [{ t: 9, at: 'bench' }, { t: 18.5, at: 'shorePath' }, { t: 21, at: 'bridge', inside: true }];
       // weekdays wander, seeded by the calendar so loads never reshuffle
       const r = calendarDay(day ^ 0x5AB1E).r;
@@ -2076,12 +2129,15 @@ function rollover(newDay) {
     jline('Hetta returned the ' + G.toolAway.tool + ' — copper now, lighter than it has any right to be.');
     G.toolAway = null;
   }
-  // 9. contract fulfillment (Restdays)
+  // 9. contract fulfillment (Restdays) + the quieter cycles of the valley
   if (typeof fulfillContracts === 'function') fulfillContracts(newDay);
+  if (typeof tickRomance === 'function') tickRomance(newDay);
+  if (typeof layEggs === 'function') layEggs();
+  if (typeof LIFE !== 'undefined') LIFE.applyBlessing(newDay);
   const seasonChanged = seasonOf(newDay) !== seasonOf(prevDay);
   G.day = newDay;
   G.hour = CONFIG.DAY_START;
-  G.stamina = G.collapsedYesterday ? 62 : 100;
+  G.stamina = (G.collapsedYesterday ? 62 : 100) + (G.maxStaminaBonus || 0);
   G.collapsedYesterday = false;
   if (seasonChanged) { paintGround(seasonOf(newDay)); }
   TL.dirty = true;
@@ -2151,6 +2207,7 @@ function performAction() {
     }
     case 'bin': shipHeld(); break;
     case 'mail': openMail(); break;
+    case 'marker': if (typeof LIFE !== 'undefined') LIFE.tryOffering(); break;
     case 'door': STORY.enterDoor(act.door); break;
     case 'tile': doTileAction(act.tt); break;
   }
@@ -2254,7 +2311,9 @@ function saveEncode() {
     farmName: G.farmName, playerName: G.playerName, look: G.look,
     hearts: G.hearts, jobs: G.jobs || [], toolTiers: G.toolTiers || {},
     toolAway: G.toolAway || null, contracts: G.contracts || {},
-    backpack: G.backpack || 12, upgrades: G.upgrades || {}, tiles
+    backpack: G.backpack || 12, upgrades: G.upgrades || {},
+    romance: G.romance || { step: 0 }, animals: G.animals || { hens: 0 },
+    staminaBonus: G.maxStaminaBonus || 0, tiles
   };
   return b64encode(JSON.stringify(data));
 }
@@ -2283,6 +2342,8 @@ function applySave(data) {
   G.hearts = data.hearts || {};
   G.jobs = data.jobs || []; G.toolTiers = data.toolTiers || {}; G.toolAway = data.toolAway || null;
   G.contracts = data.contracts || {}; G.backpack = data.backpack || 12; G.upgrades = data.upgrades || {};
+  G.romance = data.romance || { step: 0 }; G.animals = data.animals || { hens: 0 };
+  G.maxStaminaBonus = data.staminaBonus || 0;
   G.weather = weatherFor(G.day);
   location.hash = '#s=' + data.seed;
   buildWorldScene();
@@ -2739,6 +2800,7 @@ function socialTalk(npc) {
   const p = player();
   npc.face = Math.atan2(p.x - npc.x, p.z - npc.z);
   if (!npc.sprite) npc.group.rotation.y = npc.face;
+  if (typeof LIFE !== 'undefined' && LIFE.tryNessHoldout(npc)) return;
   if (typeof resumeContract === 'function' && resumeContract(npc)) return;
   if (deliverJob(npc)) return;
   if (typeof proposeContract === 'function' && proposeContract(npc)) return;
@@ -2828,7 +2890,8 @@ function tryCast() {
   G.uiOpen = 'fishing';
   toast('…cast. Watch the water.');
   hop(); sfx('plink');
-  const wait = 1000 + rand('live') * 7000;
+  let wait = 1000 + rand('live') * 7000;
+  if (G.flags.blessBite) { G.flags.blessBite = false; wait = 400; }   // an instant bite, unannounced
   FISHING.timer = setTimeout(() => {
     if (FISHING.state !== 'waiting') return;
     // weighted pick: common fish twice as likely as rare
@@ -3046,9 +3109,22 @@ function runFestival(season) {
       { say: [
         'Starlight Eve. Snow through lantern light, the gazebo strung with little flames, the whole town breathing steam.',
         { who: 'maren', text: 'The draw! One name to a slip, one gift to a name. The box has spoken since before any of us could argue with it.' },
-        'Slips are drawn, parcels change hands, someone laughs too loudly at a hand-knit hat.',
+        ...((G.romance && G.romance.step >= 3 && !G.flags.romancePaired) ? [
+          'Slips are drawn — and the box, which has spoken since before anyone could argue with it, draws Bramm for Sable and Sable for Bramm. Maren’s face is a masterpiece of neutrality.',
+          'He gives her a book, wrapped in store paper, corners squared like inventory. She gives him a page from the notebook, framed. Nobody applauds, because everybody understands.',
+          { who: 'maren', text: '…ANYWAY. More slips! More parcels! Nothing to see here but community spirit!' }
+        ] : [
+          'Slips are drawn, parcels change hands, someone laughs too loudly at a hand-knit hat.'
+        ]),
         { who: 'aldwin', text: 'Another year in the books. Some of it even balanced. We’ll take it, valley. We’ll take it.' }
       ] },
+      { fn: () => {
+        if (G.romance && G.romance.step >= 3 && !G.flags.romancePaired) {
+          G.flags.romancePaired = true;
+          G.romance.step = ROMANCE_STEPS.length;
+          jline('The Starlight draw paired Bramm and Sable. The box has never once been shaken, audited, or wrong. The whole square pretended not to see, together, in perfect coordination.');
+        }
+      } },
       { fn: () => {
         addItem('scarf', 1);
         jline('Starlight Eve again. Snow, lanterns, the draw. A year ago I was the stranger who got the town’s scarf. Tonight I knew every name in the square.');
@@ -3320,7 +3396,9 @@ function addForgeAwning() {
 const CONTRACT_DEFS = {
   maren:  { good: 'egg',         qty: 4, conn: 'tavern',  ask: 'The Bluebird goes through eggs like the river goes through water. A standing order — four eggs, every Restday, fifteen percent over market, settled the moment they land. You’d be the tavern’s farm.' },
   bramm:  { good: 'turnip',      qty: 6, conn: 'general', ask: 'The window shelf. People ask whose produce it is. So: your goods, my window, every Restday — six of your turnips to start, fifteen over market, settled instant. Storefront partners. Hm.' },
-  isolde: { good: 'wintergreen', qty: 3, conn: null,      ask: 'The clinic goes through more wintergreen than I can gather between patients. Three bunches every Restday? Fifteen percent over market — (I checked what fair looks like. Twice.)' }
+  isolde: { good: 'wintergreen', qty: 3, conn: null,      ask: 'The clinic goes through more wintergreen than I can gather between patients. Three bunches every Restday? Fifteen percent over market — (I checked what fair looks like. Twice.)' },
+  // Old Ness pays cash in person, Restdays, always (§10). No network, no checks.
+  ness:   { good: 'worm',        qty: 4, conn: null, cash: true, ask: 'Worms. Four, Restdays. I pay cash, at the dock, in person, same as the last forty years. No green marks involved. That a problem? …Didn’t think so.' }
 };
 function contractEligible(id) {
   const def = CONTRACT_DEFS[id];
@@ -3377,7 +3455,7 @@ function fulfillContracts(newDay) {
       takeItem(ct.good, ct.qty);
       const pay = Math.round(ITEMS[ct.good].sell * ct.qty * ct.premium);
       const def = CONTRACT_DEFS[id];
-      const instant = def.conn && G.network.connected[def.conn];
+      const instant = def.cash || (def.conn && G.network.connected[def.conn]);
       if (instant) {
         G.money += pay;
         G.ledger.entries.push({ day: newDay, amount: pay, enterprise: ITEMS[ct.good].enterprise, note: 'Standing order — ' + CAST[id].name });
@@ -3497,6 +3575,343 @@ function playJukebox(id) {
   sfx('coin');
   playTrack(id);
 }
+/* ==================== PHASE 4: THE LIFE ================================== */
+
+/* ---- Stage 5: Rolf, the holdout who converts (Y2 winter) ---- */
+const LIFE = {
+  tick() {
+    if (G.mode !== 'play' || G.uiOpen) return;
+    const year = yearOf(G.day), season = seasonOf(G.day);
+    // Rolf at the fence: Y2+ winter, stage 4 done, morning, player on the farm
+    if (year >= 2 && season === 'Winter' && (G.network.stage || 0) >= 4 &&
+        !G.flags.rolfConverted && G.hour >= 8 && G.hour < 12 &&
+        zoneAt(player().x, player().z) === 'farm') {
+      LIFE.runRolfFence();
+      return;
+    }
+    // the fox payoff: a scripted dawn once the valley trusts you
+    if (!G.flags.foxDone && (G.flags.offeringCount || 0) >= 4 && avgHearts() >= 4 &&
+        G.hour >= 6 && G.hour < 7.5 && zoneAt(player().x, player().z) === 'farm') {
+      LIFE.runFoxDawn();
+      return;
+    }
+    // witnessed bench beats: the sprites find each other; be nearby to see it (§12)
+    if (isRestday(G.day) && G.network.connected.general && G.hour >= 14 && G.hour < 17 &&
+        G.romance && G.romance.step >= 1 && G.romance.step <= 4 &&
+        !G.flags['romScene_' + G.romance.step]) {
+      const W = G.world;
+      if (dist2(player().x, player().z, W.bench.x, W.bench.z) < 220 &&
+          ACTORS.bramm && dist2(ACTORS.bramm.x, ACTORS.bramm.z, W.bench.x, W.bench.z) < 40) {
+        G.flags['romScene_' + G.romance.step] = true;
+        const beats = [
+          [{ who: 'sable', text: '…You again. The bench committee approves, provisionally.' },
+           { who: 'bramm', text: 'Committee. Hm. I brought inventory questions in case the quiet ran out. Haven’t needed them yet.' }],
+          [{ who: 'bramm', text: 'Brought a thermos. Two cups, because the store sells them in pairs. Purely a stocking matter.' },
+           { who: 'sable', text: 'Purely. (The notebook has opinions about that sentence. I’ve told it to mind its business.)' }],
+          [{ who: 'sable', text: 'The shore path runs a half-mile past the dock. I walk it most Restdays now. It walks better with commentary.' },
+           { who: 'bramm', text: 'I know exactly forty things about this valley’s freight history. You’ll hear all of them at a rate of two per walk. Pace yourself.' }],
+          [{ who: 'maren', text: '(psst — farmer. Corner of the room. Separate tables, same angle, third week running. I am DYING and professionally silent.)' }]
+        ];
+        say(beats[Math.min(G.romance.step - 1, beats.length - 1)], () => {
+          jline('Happened past the shore bench today. Bramm and Sable, mid-Restday. I kept my distance and my smile.');
+        });
+        return;
+      }
+    }
+    // rare white fox sighting at the treeline, dusk/dawn (silently counted)
+    const dusk = CONFIG.DUSK_HOUR[season];
+    if (!G.dayFlags.foxRolled && (G.hour < 7.5 || G.hour >= dusk)) {
+      G.dayFlags.foxRolled = true;
+      if (calendarDay(G.day ^ 0xF0C5).r() < 0.18) LIFE.spawnFox();
+    }
+  },
+
+  runRolfFence() {
+    G.flags.rolfConverted = true;
+    const W = G.world;
+    const rolf = STORY.spawnVillager('rolf', W.gate.x + 8, W.pathZ);
+    rolf.scriptLock = true;
+    STORY.scene([
+      { walk: { id: 'rolf', x: W.gate.x + 1.5, z: W.pathZ } },
+      { say: [
+        { who: 'rolf', text: 'Morning. Fine frost. Your fence post’s leaning — no, that’s not why I’m here. I’m getting to it.' },
+        { who: 'rolf', text: 'Three winters running I’ve spent every evening with that shoebox. My father’s system. His father’s. I can sort receipts blindfolded and I HAVE, because the lamp oil ran out mid-February.' },
+        { who: 'rolf', text: 'Saw Greta’s barn go up in a season. Watched Bramm at the SHORE on a Restday, of all the sights. And my stool at the Bluebird has somebody else’s initials on it now. So.' },
+        { who: 'rolf', text: '…Show me how the tags work. Not because the shoebox failed. Because — fine. Because my evenings are worth more than arithmetic. Pride’s intact, for the record. I checked.' }
+      ] },
+      { fn: () => {
+        G.network.connected.rolf = true;
+        G.network.stage = 5;
+        sfx('chime');
+        STORY.heart('rolf', 2);
+        jline('Rolf came to MY fence this morning and asked about the tags — pride intact, exactly as he said. The last holdout but one. His evenings start tonight.');
+      } },
+      { say: [
+        { who: 'rolf', text: 'Huh. That’s… that’s the whole thing? That’s an evening a day you’ve all been keeping. Right. The Bluebird owes me a stool.', mood: 'happy' }
+      ] },
+      { fn: () => { rolf.scriptLock = false; delete rolf.schedKey; } }
+    ]);
+  },
+
+  /* ---- Old Ness: the holdout who doesn't convert (§9, §20) ---- */
+  tryNessHoldout(npc) {
+    if (npc.id !== 'ness' || G.flags.nessDeclined || (G.network.stage || 0) < 3) return false;
+    G.flags.nessDeclined = true;
+    say([
+      { who: 'ness', text: 'Aldwin came by the dock again with his flyer. Third time. Watch this—' },
+      'He takes out a pocket notebook, weathered soft as deer hide. Every page: date, catch, sold, spent. Forty years of tiny even columns.',
+      { who: 'ness', text: '"My books balance every night, Aldwin." That’s all I said. He tipped his hat. Good man, knows a finished sentence when he hears one.' },
+      { who: 'ness', text: 'The green marks suit the town fine. Town suits me fine too. Both things are true, and nobody owes anybody a gadget. You want worms Restday, cash and a handshake, same as ever.' }
+    ], () => {
+      jline('Old Ness declined the network today with a forty-year notebook and complete dignity. "My books balance every night." They do, too. The valley is big enough for both kinds of ledger.');
+      STORY.heart('ness', 1);
+    });
+    return true;
+  },
+
+  /* ---- the ridge marker: offerings & blessings (never announced) ---- */
+  tryOffering() {
+    const p = player(), W = G.world;
+    if (dist2(p.x, p.z, W.marker.x, W.marker.z) > 7) return false;
+    const held = G.heldItem;
+    if (!held || !ITEMS[held] || !ITEMS[held].sell) {
+      say(['The old marker. A flat ledge, swept clean. It seems to be waiting, but stones are good at that.']);
+      return true;
+    }
+    const name = ITEMS[held].name;
+    takeItem(held, 1);
+    G.flags.offeringCount = (G.flags.offeringCount || 0) + 1;
+    G.dayFlags.offered = true;
+    sfx('plink');
+    say(['You set the ' + name.toLowerCase() + ' on the ledge. The wind considers it. Nothing happens, in the way that sometimes means something did.']);
+    jline('Left a ' + name.toLowerCase() + ' at the ridge marker. Fen swept nearby and said nothing, which from Fen is a whole conversation.');
+    return true;
+  },
+  applyBlessing(newDay) {
+    if (!G.dayFlags.offered) return;
+    const r = calendarDay(newDay ^ 0xB1E55).r();
+    if (r < 0.4) { G.flags.blessForage = true; }        // doubled forage today
+    else if (r < 0.7) { G.flags.blessBite = true; }      // an instant bite
+    else { G.stamina = CONFIG.STAMINA_MAX; }             // a rested morning
+  },
+
+  spawnFox() {
+    if (R.fox) return;
+    const W = G.world;
+    const t = W.trees[Math.floor(rand('live') * W.trees.length)];
+    if (!t) return;
+    const fox = new THREE.Group();
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), lambert('#F0EEE8'));
+    body.position.y = 0.3; body.scale.set(1.4, 0.9, 0.8); fox.add(body);
+    const head = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), lambert('#F0EEE8'));
+    head.position.set(0.42, 0.42, 0); head.rotation.z = -Math.PI / 2; fox.add(head);
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.5, 6), lambert('#E8E4DA'));
+    tail.position.set(-0.42, 0.4, 0); tail.rotation.z = Math.PI / 2.4; fox.add(tail);
+    addBlob(fox, 0, 0, 0.9, 0.5);
+    fox.position.set(t.x + 1.2, 0, t.z + 0.8);
+    R.scene.add(fox); R.fox = fox;
+    G.flags.foxSeen = (G.flags.foxSeen || 0) + 1;
+    setTimeout(() => { if (R.fox) { R.scene.remove(R.fox); R.fox = null; } }, 9000);
+    jline('At the treeline, just at the edge of the light: something white, quick, and gone. The valley kept a straight face about it.');
+  },
+
+  runFoxDawn() {
+    G.flags.foxDone = true;
+    const W = G.world;
+    STORY.scene([
+      { say: ['Dawn, sharp and pale. At the gate: the white fox. Sitting. Waiting — there is no other word for it.'] },
+      { fade: () => {
+        actorSetPos(player(), W.overlook.x + 2, W.overlook.z + 3);
+        updateCamera(player().x, player().z, true);
+      } },
+      { say: [
+        'It leads you up the ridge trail, never hurrying, never letting the distance change, to the overlook above the valley.',
+        'The whole of ' + W.townName + ' below: your field, the river, smoke from twelve chimneys, the green glyphs too small to see and somehow present anyway.',
+        'The fox sits beside you exactly as long as the sunrise takes. Then it doesn’t, and the ledge where it sat holds a sprig of wintergreen that wasn’t there before.',
+        'Nothing is explained. You feel like a field after rain.'
+      ] },
+      { fn: () => {
+        G.maxStaminaBonus = 15;
+        G.stamina = CONFIG.STAMINA_MAX + 15;
+        addItem('wintergreen', 1);
+        jline('The fox. The overlook. The whole valley at sunrise, and something in my chest that swings a hoe lighter now. I will never explain this to anyone, and Fen will never ask.');
+      } },
+      { say: [{ who: 'aldwin', text: '…You came down the ridge trail at dawn with your hat in your hand. My grandmother used to say the valley picks one pair of boots a generation. I’ll say no more about it.' }] }
+    ]);
+  }
+};
+function avgHearts() {
+  const vals = Object.values(G.hearts);
+  return vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : 0;
+}
+
+/* ---- Bramm & Sable: one step per shared Restday (§12) ---- */
+const ROMANCE_STEPS = [
+  { j: 'Bramm and Sable were both at the shore today. Opposite ends of the bench, one shared silence. The town noticed. The town says nothing. Yet.' },
+  { j: 'The bench again — closer to the middle this time. Sable read; Bramm watched the water like it owed him a delivery. Neither left first.' },
+  { j: 'A thermos on the shore bench today. Two cups. Nobody in the valley owns a two-cup thermos by accident.' },
+  { j: 'Bramm and Sable walked the shore path together this Restday — the long way, past the dock, back by the bend. Old Ness pretended so hard not to watch that he caught nothing all afternoon.' },
+  { j: 'Weeknight now, not even a Restday: both of them at the Bluebird. Separate tables, angled exactly toward each other. Maren is being SO professional about it.' },
+  { j: 'The same table. The Bluebird, the corner one. Bramm laughed — audibly, in public, on the record. Sable wrote something down and didn’t share it. Some entries are private.' }
+];
+function tickRomance(newDay) {
+  if (!G.network.connected.general) return;
+  if (!isRestday(newDay - 1)) return;              // a Restday just ended
+  G.romance = G.romance || { step: 0 };
+  if (G.romance.step >= ROMANCE_STEPS.length) return;
+  const s = ROMANCE_STEPS[G.romance.step];
+  G.romance.step++;
+  jline(s.j);
+  if (G.romance.step === ROMANCE_STEPS.length) {
+    G.flags.romancePaired = true;
+    G.mail.push({ day: newDay, from: 'Maren', title: 'You did NOT hear this from me',
+      body: 'Corner table. Every evening this week. He special-ordered a BOOK, farmer. Two, actually — "for a friend." I have run this tavern eleven years and this is the finest thing it has ever hosted. — M.', read: false });
+  }
+}
+
+/* ---- grants board (the Bluebird corkboard, §8) ---- */
+const GRANTS = [
+  { id: 'riverbank', name: 'Riverbank Planting Grant', amount: 300,
+    req: 'a full season of crop income on the books',
+    check: () => {
+      const cropNames = Object.values(CONFIG.CROPS).map(c => c.name);
+      return G.ledger.entries.some(e => cropNames.includes(e.enterprise) && e.amount > 0 && e.day <= G.day - 3);
+    } },
+  { id: 'coop', name: 'Coop Improvement Grant', amount: 500,
+    req: 'egg income on the books',
+    check: () => G.ledger.entries.some(e => e.enterprise === 'Eggs' && e.amount > 0) }
+];
+function openGrantsBoard() {
+  const opts = GRANTS.map(g => {
+    if (G.flags['grant_' + g.id]) return '✓ ' + g.name + ' (awarded)';
+    return g.name + ' — $' + g.amount + ' (needs ' + g.req + ')';
+  });
+  opts.push('Step away');
+  say(['A corkboard by the Bluebird’s door: county and co-op grants, pinned in neat rows. Aldwin curates it like a parish notice board.'], () => {
+    showChoice(opts, i => {
+      if (i >= GRANTS.length) return;
+      const g = GRANTS[i];
+      if (G.flags['grant_' + g.id]) { toast('Already awarded.'); return; }
+      if (!G.ledger.unlocked) { say(['The application wants a season of records. You’d need the Ledger for that.']); return; }
+      if (!g.check()) { say(['You read the fine print: ' + g.req + '. The Ledger isn’t there yet — but now you know exactly what to build toward. That’s new.']); return; }
+      G.flags['grant_' + g.id] = true;
+      G.mail.push({ day: G.day, from: 'Valley Co-op', title: g.name + ' — APPROVED',
+        body: 'Your Ledger history made this the shortest review of the season. $' + g.amount + ' enclosed. Spend it on the land. — VC', read: false });
+      G.money += g.amount;
+      G.ledger.entries.push({ day: G.day, amount: g.amount, enterprise: 'Odd Jobs', note: g.name });
+      sfx('chime');
+      jline('Applied for the ' + g.name.toLowerCase() + ' with one season of clean pages. Approved same day. Greta was right: paper opens gates.');
+      toast(g.name + ': $' + g.amount + ' awarded.');
+    });
+  });
+}
+
+/* ---- chickens (scope-gated animals, §7) ---- */
+function openCoopMenu() {
+  G.animals = G.animals || { hens: 0 };
+  const items = [];
+  if (!G.upgrades.coop) {
+    items.push({ icon: '🛖', name: 'Have Corwin build a coop', price: 300,
+      desc: 'Fits four hens. Corwin already has opinions about the roof.',
+      onBuy: () => { G.upgrades.coop = true; toast('The coop goes up by evening. It has a weathervane. Nobody asked for the weathervane.'); closeShop(); } });
+  } else if (G.animals.hens < 4) {
+    items.push({ icon: '🐔', name: 'A good laying hen', price: 100,
+      desc: 'From the line Greta’s grandmother started. An egg most mornings.',
+      onBuy: () => {
+        G.animals.hens++;
+        jline('A new hen from Greta — sixty years of careful breeding, now scratching around my coop like she owns it. She does, really.');
+        toast('Hen #' + G.animals.hens + ' settles in.');
+      } });
+  }
+  ITEMS.egg = ITEMS.egg || { name: 'Egg', icon: '🥚', sell: 8, enterprise: 'Eggs' };
+  items.push({ icon: '🥚', name: 'Fresh Eggs ×4', price: 26, give: 'egg', count: 4, desc: 'From the good layers.' });
+  openShop("Greta's Ranch", items, 'the goose supervises all transactions');
+}
+function layEggs() {
+  if (!G.animals || !G.animals.hens) return;
+  const n = G.animals.hens;
+  ITEMS.egg = ITEMS.egg || { name: 'Egg', icon: '🥚', sell: 8, enterprise: 'Eggs' };
+  addItem('egg', n);
+  G.dayFlags.eggs = n;
+}
+
+/* ---- the year-review PNG export (§13) ---- */
+function exportYearReviewPNG(reviewYear) {
+  const c = document.createElement('canvas');
+  c.width = 720; c.height = 900;
+  const ctx = c.getContext('2d');
+  const P = CONFIG.PALETTE;
+  ctx.fillStyle = P.green; ctx.fillRect(0, 0, 720, 900);
+  ctx.fillStyle = P.cream; ctx.fillRect(18, 18, 684, 864);
+  ctx.fillStyle = P.green; ctx.font = 'bold 34px Trebuchet MS'; ctx.textAlign = 'center';
+  ctx.fillText('YEAR ' + reviewYear + ' — ' + G.farmName.toUpperCase(), 360, 78);
+  ctx.font = '16px Trebuchet MS'; ctx.fillStyle = P.ink;
+  ctx.fillText(G.world.townName + ' Valley · An Annual Report', 360, 106);
+  ctx.strokeStyle = P.green; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(60, 124); ctx.lineTo(660, 124); ctx.stroke();
+  let y = 160;
+  ctx.textAlign = 'left'; ctx.font = 'bold 19px Trebuchet MS'; ctx.fillStyle = P.green;
+  ctx.fillText('THE LEDGER SAYS', 60, y); y += 28;
+  ctx.font = '16px Trebuchet MS';
+  const by = {};
+  for (const e of G.ledger.entries) by[e.enterprise] = (by[e.enterprise] || 0) + e.amount;
+  for (const k of Object.keys(by).sort((a, b) => by[b] - by[a]).slice(0, 10)) {
+    ctx.fillStyle = P.ink; ctx.fillText(k, 76, y);
+    ctx.fillStyle = by[k] >= 0 ? P.green : '#A05548';
+    ctx.textAlign = 'right';
+    ctx.fillText((by[k] >= 0 ? '+$' : '−$') + Math.abs(by[k]), 640, y);
+    ctx.textAlign = 'left';
+    y += 24;
+  }
+  y += 16;
+  ctx.font = 'bold 19px Trebuchet MS'; ctx.fillStyle = P.green;
+  ctx.fillText('THE JOURNAL REMEMBERS', 60, y); y += 28;
+  ctx.font = '13px Trebuchet MS'; ctx.fillStyle = P.ink;
+  const highlights = G.journal.slice(-12).map(e => e.lines[0]).filter(Boolean).slice(-9);
+  for (const h of highlights) {
+    const line = h.length > 78 ? h.slice(0, 75) + '…' : h;
+    ctx.fillText('· ' + line, 76, y);
+    y += 22;
+  }
+  y += 16;
+  const customers = Object.keys(G.contracts || {}).filter(id => G.contracts[id].status !== 'ended');
+  if (customers.length) {
+    ctx.font = 'bold 19px Trebuchet MS'; ctx.fillStyle = P.green;
+    ctx.fillText('YOUR CUSTOMERS', 60, y); y += 16;
+    let x = 76;
+    for (const id of customers.slice(0, 6)) {
+      const pc = document.createElement('canvas');
+      pc.width = 84; pc.height = 84;
+      drawPortraitTo(pc.getContext('2d'), id, 'happy', 84);
+      ctx.drawImage(pc, x, y, 64, 64);
+      ctx.font = '12px Trebuchet MS'; ctx.fillStyle = P.ink; ctx.textAlign = 'center';
+      ctx.fillText(CAST[id].name, x + 32, y + 80);
+      ctx.textAlign = 'left';
+      x += 84;
+    }
+    y += 100;
+  }
+  ctx.font = '12px Trebuchet MS'; ctx.fillStyle = P.green; ctx.textAlign = 'center';
+  ctx.fillText('ALMANAC · made with Ambrook · ambrook.com', 360, 848);
+  ctx.fillText('this valley: seed ' + G.world.seed, 360, 866);
+  const a = document.createElement('a');
+  a.href = c.toDataURL('image/png');
+  a.download = G.farmName.replace(/\s+/g, '_').toLowerCase() + '_year' + reviewYear + '.png';
+  a.click();
+  toast('Year in review saved as a picture.');
+}
+
+/* ---- jukebox: the full slate (§15) ---- */
+Object.assign(TRACKS, {
+  twostep: { bpm: 116, bassType: 'triangle', leadType: 'square', juke: true,
+    bass: [43, 0, 47, 0, 50, 0, 47, 0, 48, 0, 52, 0, 55, 0, 50, 0],
+    lead: [67, 0, 71, 67, 0, 74, 0, 71, 72, 72, 0, 76, 74, 0, 71, 0] },
+  neon: { bpm: 88, bassType: 'triangle', leadType: 'square', juke: true,
+    bass: [41, 0, 0, 48, 0, 0, 44, 0, 46, 0, 0, 53, 0, 0, 48, 0],
+    lead: [65, 0, 68, 0, 72, 70, 68, 0, 65, 0, 63, 65, 0, 60, 0, 0] }
+});
+JUKEBOX.push({ id: 'twostep', title: 'Two-Step Tuesday' });
+JUKEBOX.push({ id: 'neon', title: 'Neon Bluebird' });
 /* ================================= UI ==================================== */
 // DOM builders — all dynamic text goes through textContent (no innerHTML).
 function el(tag, cls, text) {
@@ -4470,6 +4885,7 @@ const STORY = {
     const day = G.day, p = player();
     if (!p || G.mode !== 'play' || G.uiOpen) return;
     ARC.tick();
+    LIFE.tick();
     // seasonal festivals, mid-season day 2 (the prologue's fair day is authored)
     if (day > 11 && dayOfSeason(day) === 2 && !G.dayFlags.festivalDone) {
       const season = seasonOf(day);
@@ -4768,6 +5184,9 @@ const STORY = {
     const btnJ = el('button', 'uiBtn', 'Export journal (.txt)');
     btnJ.onclick = exportJournal;
     card.appendChild(btnJ);
+    const btnP = el('button', 'uiBtn', 'Save as picture (.png)');
+    btnP.onclick = () => exportYearReviewPNG(reviewYear);
+    card.appendChild(btnP);
     const firstYear = reviewYear === 1;
     const btn = el('button', 'uiBtn', firstYear ? 'Begin Year 2 — your first spring' : 'Begin Year ' + (reviewYear + 1));
     btn.onclick = () => {
@@ -4826,7 +5245,11 @@ const STORY = {
       STORY.openGeneral();
       return;
     }
-    if (door.id === 'ranch') { if (rest) { say(['The ranch gate is latched for the Restday. Somewhere beyond it, a goose disapproves of you.']); return; } STORY.openRanch(); return; }
+    if (door.id === 'ranch') {
+      if (rest) { say(['The ranch gate is latched for the Restday. Somewhere beyond it, a goose disapproves of you.']); return; }
+      if (typeof openCoopMenu === 'function') openCoopMenu(); else STORY.openRanch();
+      return;
+    }
     // the tavern keeps its own hours: Restday evenings it's the fullest room in the valley (§5)
     if (door.id === 'tavern' && rest) {
       if (G.hour < 17) { say(['The Bluebird opens at dusk on Restdays — and then the whole valley shows up at once.']); return; }
@@ -4839,9 +5262,10 @@ const STORY = {
         return;
       }
       const juke = JUKEBOX.filter(j => !(j.retiresAtStage && (G.network.stage || 0) >= j.retiresAtStage));
-      showChoice(['Talk to Maren', ...juke.map(j => '♪ ' + j.title), 'Leave'], i => {
+      showChoice(['Talk to Maren', 'The grants board', ...juke.map(j => '♪ ' + j.title), 'Leave'], i => {
         if (i === 0) say([{ who: 'maren', text: 'Bluebird’s open! Well — the door is. The kitchen argues. What’s the news from the farm?' }]);
-        else if (i <= juke.length) { playJukebox(juke[i - 1].id); toast('♪ ' + juke[i - 1].title); }
+        else if (i === 1) openGrantsBoard();
+        else if (i <= juke.length + 1) { playJukebox(juke[i - 2].id); toast('♪ ' + juke[i - 2].title); }
       });
     }
     else if (door.id === 'forge') {
