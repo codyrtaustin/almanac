@@ -343,6 +343,51 @@
   Verified this pass: live CropSprites debug grid (all 9 ripe crops), a
   fresh in-world screenshot at the REAL default camera zoom (not a debug
   override) with 6 crops planted side by side, zero console errors, 60fps.
+
+  V7 — BACKLOG PASS (user: "let's just finish any remaining todos"). Worked
+  the V3 "explicitly not done" list. Two items closed:
+  - §11 ambient season particles: spring petals, autumn leaf-drift, and
+    summer dusk/night fireflies, on a new buildAmbientParticles()/
+    tickAmbientParticles() pair separate from the existing rain/snow system
+    and gated off whenever it's actually raining/snowing/storming so the
+    two never compete. Winter gets no ambient layer of its own — snow
+    (a weather state) already covers that slot when it falls, and doing
+    nothing the rest of the time matches "only what's specified" better
+    than inventing a filler effect. Verified all four gates (autumn color,
+    summer-midday-off, summer-dusk-on, rain-suppressed) by forcing
+    G.day/G.hour/G.weather directly and reading the particle system's
+    visible/color state back.
+  - §6 character silhouette geometry hooks: an apron for the three
+    trade-facing shopkeepers (Bramm/Hetta/Maren — general/smith/tavern,
+    per SPEC §9's actual role table, not invented), glasses for the two
+    villagers SPEC §9 tags "bookish" (Isolde, Sable), and a 0.82 scale on
+    Pip, SPEC's one "Kid" role — the only villager whose role implies a
+    height difference. A real bug surfaced and got fixed, logged in the
+    interest of the same honest build record as V6d: the first apron
+    version used a cylinder radius SMALLER than the body cylinder it was
+    meant to sit in front of, so it rendered entirely hidden inside the
+    shirt — invisible in every test. Caught by rendering the live chibi
+    geometry directly at a controlled camera angle (bypassing the small
+    64x96 bake atlas, same technique V5 used) and comparing a before/after
+    crop; fixed by making the apron's radius larger than the body's at the
+    same height. Re-verified after the fix in the ACTUAL baked sprite atlas
+    (not just the live-geometry test) — apron and glasses both read clearly
+    at real in-game resolution.
+  Remaining backlog, still open and sized honestly: §3 shared-family
+  quantization palettes (cosmetic/internal) · §4 full ~40-tile atlas
+  (shore edges, water-edge sets, ford, path junction — have a ~16-tile
+  subset) · §7 full 12-portrait rebuild beyond the shared shadow pass ·
+  §9 custom 6x8 bitmap font (has a spec-sanctioned system-font fallback
+  already in use) · §10 the 82-icon manifest (still emoji-based — the
+  single largest remaining item, deliberately not started piecemeal this
+  pass rather than shipping half the set) · §4's diagonal-45°-grid
+  (structural, conflicts with the locked-camera pillar, needs explicit
+  user sign-off before any work starts, still not queued).
+  Verified: full Year-1 regression (plant/water/harvest) on a fresh page
+  load, zero console errors, 60fps confirmed clean (a mid-session reading
+  of 3fps turned out to be leaked debug WebGLRenderer instances from this
+  session's own manual verification calls, not a real regression — retested
+  on a clean load to confirm).
 -->
 <style>
   :root {
@@ -2597,6 +2642,7 @@ function buildWorldScene() {
 
   buildTileLayers(WG);
   buildParticles(WG);
+  buildAmbientParticles(WG);
   R.scene.add(WG);
 }
 
@@ -2763,6 +2809,85 @@ function tickParticles(dt) {
   p.geometry.attributes.position.needsUpdate = true;
 }
 
+/* ---- ambient season particles (Art Bible §11 backlog item) ----
+   Spring petals, summer dusk/night fireflies, autumn leaf-drift — separate
+   from the weather system above and gated off whenever it's actually
+   raining/snowing/storming so the two never compete visually. Winter has no
+   ambient layer of its own; snow (a weather state, not a season one) already
+   covers that slot when it falls, and doing nothing the rest of the time
+   matches the restrained "only what's specified" rule better than inventing
+   a filler effect. */
+let ambientClock = 0;
+function buildAmbientParticles(parent) {
+  const n = 90;
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(n * 3);
+  const ph = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    pos[i * 3] = (Math.random() - 0.5) * 34;
+    pos[i * 3 + 1] = Math.random() * 10;
+    pos[i * 3 + 2] = (Math.random() - 0.5) * 26;
+    ph[i] = Math.random() * Math.PI * 2;
+  }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('aPhase', new THREE.BufferAttribute(ph, 1));
+  const mat = new THREE.PointsMaterial({ color: 0xffffff, size: 0.13, transparent: true, opacity: 0.8, depthWrite: false });
+  R.ambientParticles = new THREE.Points(geo, mat);
+  R.ambientParticles.visible = false; R.ambientParticles.frustumCulled = false;
+  parent.add(R.ambientParticles);
+}
+function tickAmbientParticles(dt) {
+  const p = R.ambientParticles;
+  if (!p) return;
+  if (WET(G.weather) || G.weather === 'snow' || G.weather === 'storm') { p.visible = false; return; }
+  const season = seasonOf(G.day);
+  const duskSoon = G.hour >= CONFIG.DUSK_HOUR[season] - 1.5;
+  let mode = null;
+  if (season === 'Spring') mode = 'petal';
+  else if (season === 'Autumn') mode = 'leaf';
+  else if (season === 'Summer' && duskSoon) mode = 'firefly';
+  p.visible = !!mode;
+  if (!mode) return;
+  ambientClock += dt;
+  const t = ambientClock;
+  const arr = p.geometry.attributes.position.array;
+  const ph = p.geometry.attributes.aPhase.array;
+  const n = arr.length / 3;
+  if (mode === 'petal') {
+    p.material.color.set(0xF2D8E0); p.material.size = 0.13; p.material.opacity = 0.85;
+    for (let i = 0; i < n; i++) {
+      arr[i * 3 + 1] -= 0.5 * dt;
+      arr[i * 3] += Math.sin(t * 0.6 + ph[i]) * dt * 0.5;
+      arr[i * 3 + 2] += Math.cos(t * 0.5 + ph[i]) * dt * 0.3;
+      if (arr[i * 3 + 1] < 0) {
+        arr[i * 3 + 1] = 8 + Math.random() * 3;
+        arr[i * 3] = (Math.random() - 0.5) * 34; arr[i * 3 + 2] = (Math.random() - 0.5) * 26;
+      }
+    }
+  } else if (mode === 'leaf') {
+    p.material.color.set(0xC97B3C); p.material.size = 0.15; p.material.opacity = 0.8;
+    for (let i = 0; i < n; i++) {
+      arr[i * 3 + 1] -= 0.9 * dt;
+      arr[i * 3] += Math.sin(t * 0.9 + ph[i]) * dt * 1.1;
+      if (arr[i * 3 + 1] < 0) {
+        arr[i * 3 + 1] = 8 + Math.random() * 3;
+        arr[i * 3] = (Math.random() - 0.5) * 34; arr[i * 3 + 2] = (Math.random() - 0.5) * 26;
+      }
+    }
+  } else if (mode === 'firefly') {
+    p.material.color.set(0xD8E87C); p.material.size = 0.11;
+    p.material.opacity = 0.5 + Math.sin(t * 2) * 0.25;
+    for (let i = 0; i < n; i++) {
+      arr[i * 3] += Math.sin(t * 0.8 + ph[i]) * dt * 0.4;
+      arr[i * 3 + 1] += Math.cos(t * 1.3 + ph[i] * 2) * dt * 0.3;
+      arr[i * 3 + 2] += Math.sin(t * 0.7 + ph[i] * 1.5) * dt * 0.4;
+      arr[i * 3 + 1] = clamp(arr[i * 3 + 1], 0.3, 3.2);
+    }
+  }
+  p.position.set(R.followX, 0, R.followZ);
+  p.geometry.attributes.position.needsUpdate = true;
+}
+
 /* ---- day-grade overlays, window lights, sky ---- */
 // Art Bible §1: the reference engine steps a 24h light curve (night floor
 // ~31% brightness, golden hour holds R while G/B fall, sunset deepens that
@@ -2898,6 +3023,22 @@ function makeChibi(rec) {
   body.position.y = 0.54; g.add(body);
   const chest = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 7), shirt);
   chest.scale.set(1, 0.85, 0.9); chest.position.y = 0.72; g.add(chest);
+  // Art Bible §6 backlog: silhouette geometry hooks, tied to the villager's
+  // actual SPEC §9 role rather than invented — a work apron for the three
+  // trade-facing shopkeepers (smith/tavern/general), never decorative.
+  if (rec.apron) {
+    // radii MUST be bigger than the body cylinder's (0.185/0.225 at this
+    // height) or the panel renders entirely inside/behind the shirt and is
+    // invisible — first version had this backwards (0.17/0.2, smaller than
+    // the body), confirmed invisible via a cropped bake-frame debug render,
+    // fixed here.
+    const apronMat = lambert(rec.apron === true ? '#C9B592' : rec.apron);
+    const panel = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.245, 0.42, 10, 1, false,
+      -Math.PI * 0.32, Math.PI * 0.64), apronMat);
+    panel.position.set(0, 0.46, 0.02); g.add(panel);
+    const strap = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.24, 0.02), apronMat);
+    strap.position.set(0, 0.72, 0.17); strap.rotation.x = -0.15; g.add(strap);
+  }
   const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.11, 0.09, 8), skin);
   neck.position.y = 0.83; g.add(neck);
   for (const sx of [-0.28, 0.28]) {
@@ -2929,6 +3070,18 @@ function makeChibi(rec) {
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.038, 6, 5), lambert('#2E2620'));
     eye.position.set(ex, 1.07, 0.31); g.add(eye);
   }
+  // §6 backlog: glasses for the two bookish-trait villagers (Isolde the
+  // doctor, Sable the wanderer) — a frame ring per eye plus a bridge, thin
+  // enough to read as an accessory rather than obscuring the face.
+  if (rec.glasses) {
+    const frameMat = lambert('#3E3630');
+    for (const ex of [-0.12, 0.12]) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.06, 0.012, 5, 10), frameMat);
+      ring.position.set(ex, 1.07, 0.33); g.add(ring);
+    }
+    const bridge = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.012, 0.012), frameMat);
+    bridge.position.set(0, 1.07, 0.33); g.add(bridge);
+  }
   if (rec.hat) {
     const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.05, 10), lambert(rec.hat));
     brim.position.y = 1.32; g.add(brim);
@@ -2936,6 +3089,10 @@ function makeChibi(rec) {
     top.position.y = 1.44; g.add(top);
   }
   g.userData = { legs, arms };
+  // §6 backlog: per-character scale — Pip is SPEC §9's one "Kid" role,
+  // the rest stay at the authored 1.0 baseline (no other villager's role
+  // implies a height difference, so no scale is invented for them).
+  if (rec.scale) g.scale.setScalar(rec.scale);
   return g;
 }
 
@@ -2943,18 +3100,23 @@ function makeChibi(rec) {
 // Art Bible §6: the thirteen keys — signature hue + garment colors per
 // character, silhouette carried by headwear/hair shape, never face detail.
 const CAST = {
-  bramm:  { name: 'Bramm',   skin: SKINS[1], hair: '#8A7A66', shirt: '#B98E4E', hat: null },
-  hetta:  { name: 'Hetta',   skin: SKINS[2], hair: '#4A4038', shirt: '#5E8E8A', long: true },
+  // apron/glasses/scale (§6 backlog, this pass): tied to each villager's
+  // actual SPEC §9 role — Bramm/Hetta/Maren are the three shopkeepers
+  // (general/smith/tavern) who'd plausibly wear a work apron; Isolde
+  // (doctor) and Sable (both "bookish") get glasses; Pip is SPEC's one
+  // "Kid" role, so the only villager with a scale below 1.0.
+  bramm:  { name: 'Bramm',   skin: SKINS[1], hair: '#8A7A66', shirt: '#B98E4E', hat: null, apron: true },
+  hetta:  { name: 'Hetta',   skin: SKINS[2], hair: '#4A4038', shirt: '#5E8E8A', long: true, apron: '#8A6A4E' },
   corwin: { name: 'Corwin',  skin: SKINS[1], hair: '#C0A06A', shirt: '#A97B55' },
-  isolde: { name: 'Isolde',  skin: SKINS[0], hair: '#6E4A3A', shirt: '#EDE2CC', long: true },
+  isolde: { name: 'Isolde',  skin: SKINS[0], hair: '#6E4A3A', shirt: '#EDE2CC', long: true, glasses: true },
   rolf:   { name: 'Rolf',    skin: SKINS[2], hair: '#D0B06A', shirt: '#8A5444', hat: '#B99A6B' },
-  maren:  { name: 'Maren',   skin: SKINS[0], hair: '#7A4E38', shirt: '#5E7EA6', long: true },
+  maren:  { name: 'Maren',   skin: SKINS[0], hair: '#7A4E38', shirt: '#5E7EA6', long: true, apron: true },
   greta:  { name: 'Greta',   skin: SKINS[1], hair: '#D8C89A', shirt: '#7E8A5E', long: true, hat: '#B99A6B' },
   aldwin: { name: 'Aldwin',  skin: SKINS[0], hair: '#E0DCD0', shirt: '#6E7A5A', pants: '#8A8278' },
   ness:   { name: 'Old Ness', skin: SKINS[3], hair: '#B8B4A8', shirt: '#6E6A4E', hat: '#8C8A5E' },
   fen:    { name: 'Fen',     skin: SKINS[2], hair: '#D8D4C8', shirt: '#A8AEB4' },
-  pip:    { name: 'Pip',     skin: SKINS[1], hair: '#8A5E44', shirt: '#6E86A0', hat: '#B3574C' },
-  sable:  { name: 'Sable',   skin: SKINS[0], hair: '#3A3430', shirt: '#7A6474', long: true }
+  pip:    { name: 'Pip',     skin: SKINS[1], hair: '#8A5E44', shirt: '#6E86A0', hat: '#B3574C', scale: 0.82 },
+  sable:  { name: 'Sable',   skin: SKINS[0], hair: '#3A3430', shirt: '#7A6474', long: true, glasses: true }
 };
 
 const ACTORS = {};   // id -> actor (player + villagers)
@@ -7285,6 +7447,7 @@ function frame(tms) {
   rebuildTiles();
   tickWater(dt);
   tickParticles(dt);
+  tickAmbientParticles(dt);
   gradeT += dt;
   if (gradeT > 0.5) { gradeT = 0; applyGrade(); }
   hudT += dt;
