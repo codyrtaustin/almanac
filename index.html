@@ -285,6 +285,64 @@
   3D world at close camera range — both match the reference construction.
   Full Year-1 regression after: 60fps, zero console errors, harvest adds the
   right items to inventory.
+
+  V6d — V6c WAS WRONG; REDONE FROM A FULL-RESOLUTION CROP OF THE SAME
+  REFERENCE (user: "do you really think that's a match? it's terrible" — a
+  fair call). V6c's "shrink the foliage, blow up the fruit" read turned out
+  to be a misreading of the low-res screenshot crop used at the time. Pulled
+  the full 905x680 source image and cropped just the corn/eggplant/cabbage/
+  tomato patches at 3x scale for a real close look. What that showed:
+  corn/eggplant/tomato all sit on a LARGE ring of pointed leaf blades
+  radiating outward in a flat star — comparable in size to the fruit, not a
+  token collar — with the colored fruit nested in the center. Cabbage is the
+  one outlier: a bare lumpy head, no crown, which V6c's approach happened to
+  fit by accident. Rebuilt corn/eggplant('cluster')/tomato('vine') on a new
+  leafCrown() generator (pointed cone blades radiating from a center point).
+
+  Two real bugs surfaced and got fixed, logged honestly since both produced
+  visibly broken output before the fix:
+  1. leafCrown's first version set both the "tilt up from ground" rotation
+     and the "spread to radial angle" rotation on the SAME Object3D
+     (pivot.rotation.z then pivot.rotation.y). Since the blade starts
+     pointing straight up the Y axis, a same-object rotation.y is a no-op on
+     a vector that's ON the rotation axis — every blade collapsed onto the
+     same direction instead of fanning into a star, rendering as a tiny
+     clustered tuft. Fixed by splitting tilt and spread into two separate
+     nested groups (tilt as a child of spread), which composes unambiguously
+     regardless of Euler order.
+  2. Even after that fix, the crown still rendered too small to read. Root
+     cause: the crop bake camera sat at ~3 degrees off horizontal (nearly
+     eye-level) while the real game camera (CONFIG.CAM_OFFSET) looks down at
+     ~49 degrees. Billboards always face the player, but the CONTENT baked
+     onto them doesn't — it was painted once from this fixed bake camera. A
+     flat, horizontal leaf crown is edge-on to a near-frontal camera and
+     collapses to a sliver no matter how correct its geometry is. Steepened
+     the bake camera to ~44 degrees (close to the real game's ~49) — this is
+     why trees/props (mostly vertical, not flat radiating shapes) never
+     needed this fix but crops did once they grew a horizontal crown.
+  Follow-on tuning after both fixes landed: leafCrown blades made bigger/
+  bolder (more of them, longer, thicker) since the correct-but-small crown
+  still under-matched the reference's proportions; turnip/potato/pumpkin's
+  foliage collar (which stayed on the older lump-cluster approach, not
+  leafCrown) had to be resized twice — first it was sized smaller than the
+  bulb and vanished entirely behind it under the new steeper camera, then an
+  overcorrection made it swallow the bulb whole; settled on a modest
+  peek-out sized just past the bulb's own radius.
+
+  Also looked into anthropic sourcing this properly: found a real, complete
+  HM64 decompilation (github.com/harvestwhisperer/hm64-decomp, 100% decomp,
+  byte-identical rebuild). Confirmed it contains ONLY source code and game
+  logic — no sprite/texture assets are committed (extraction requires a ROM
+  file the project deliberately doesn't distribute), so it has nothing to
+  offer for visual matching beyond what the screenshot study already gave
+  us. Useful for one thing: cross-checked the crop lifecycle state names
+  (PLANTED_STAGE_1 -> SPROUT_STAGE_1 -> RIPE_WATERED -> DEAD) and the real
+  crop roster in groundObjects.c/items.h, both of which already matched
+  ALMANAC's existing implementation.
+
+  Verified this pass: live CropSprites debug grid (all 9 ripe crops), a
+  fresh in-world screenshot at the REAL default camera zoom (not a debug
+  override) with 6 crops planted side by side, zero console errors, 60fps.
 -->
 <style>
   :root {
@@ -1770,7 +1828,16 @@ function bakeCropSprites3D() {
       // sphere rendered zero pixels with the asymmetric version, ~450px
       // filled with this one) before wiring it in here.
       const cam = new THREE.OrthographicCamera(-worldW / 2, worldW / 2, 0.42, -0.42, 0.1, 20);
-      cam.position.set(0, 0.4, 0.85); cam.lookAt(0, 0.35, 0);
+      // V6d fix: this was ~3 degrees off horizontal (nearly eye-level),
+      // while the real game camera (CONFIG.CAM_OFFSET) looks down at
+      // ~49 degrees. Billboards always face the player, but the CONTENT
+      // baked onto them does not re-render per frame — it was painted once,
+      // from this camera. A flat horizontal leaf-crown radiating outward is
+      // edge-on to a near-frontal camera and collapses to a sliver
+      // regardless of how correct its geometry is; matching the real
+      // camera's elevation is what lets a horizontal radiating pattern
+      // actually read. ~44 degrees here, close to the real ~49.
+      cam.position.set(0, 0.9, 0.7); cam.lookAt(0, 0.22, 0);
       rend.setClearColor(0x000000, 0);
       rend.render(scene, cam);
       const canvas = document.createElement('canvas');
@@ -1789,6 +1856,38 @@ function bakeCropSprites3D() {
       }
       pts.push([0, baseY + 0.1 * scale, 0, 0.15 * scale]);
       return pts;
+    };
+    // A ring of pointed leaf blades radiating flat-ish from a center point,
+    // rising slightly off the ground — verified against a real HM64
+    // screenshot: corn/eggplant/tomato all sit on this same radiating-blade
+    // leaf crown (cabbage does not — it's a bare head, no crown at all).
+    // This is the piece the first crop pass got wrong: it's not a thin
+    // foliage collar, it's a large, structurally distinctive part of the
+    // silhouette, comparable in size to the fruit itself.
+    const leafCrown = (n, color, len, rise) => {
+      const g = new THREE.Group();
+      const mat = lambert(color);
+      for (let i = 0; i < n; i++) {
+        const a = i / n * Math.PI * 2;
+        const blade = new THREE.Mesh(new THREE.ConeGeometry(0.055, len, 4), mat);
+        blade.position.y = len / 2;
+        // tilt (single-axis) and radial spread (single-axis) MUST be two
+        // separate nested groups, not two rotation components on one
+        // object: the blade starts on the Y axis, so a same-object
+        // rotation.y is a no-op until something moves it off-axis first —
+        // that bug collapsed every blade onto the same direction (a tiny
+        // clustered tuft) instead of fanning them into a star. Verified via
+        // the debug texture grid before/after this split.
+        const tilt = new THREE.Group();
+        tilt.add(blade);
+        tilt.rotation.z = -(Math.PI / 2 - rise);
+        const spread = new THREE.Group();
+        spread.add(tilt);
+        spread.position.set(0, 0.03, 0);
+        spread.rotation.y = a;
+        g.add(spread);
+      }
+      return g;
     };
 
     // shared stages
@@ -1820,21 +1919,24 @@ function bakeCropSprites3D() {
       return g;
     });
 
-    // V6c — matched against a real HM64 farm-field screenshot (RPGFan
-    // gallery) at the user's request. The fact that carries over (a ratio,
-    // not any traced art): a ripe HM64 crop tile is the harvestable item
-    // itself, oversized, sitting directly on the ground — 2-4 big fruit/veg
-    // shapes filling most of the silhouette, with the plant reduced to a
-    // thin foliage collar peeking from underneath. It is NOT a stem-and-
-    // leaves plant wearing small fruit as an accessory. Concretely: no
-    // visible stem on any ripe stage below, foliage lumps pulled down near
-    // the ground and shrunk, and every fruit/veg primitive sized up so it
-    // dominates the read. Corn in particular — the user's own example — is
-    // now two big standing ears with a leaf collar, no stalk.
+    // V6d — REDONE against a full-resolution crop of the real HM64
+    // screenshot (see p01_head.html V6d note). V6c's "shrink the foliage,
+    // blow up the fruit" read was wrong: at full res, corn/eggplant/tomato
+    // all sit on a large, structurally prominent ring of pointed leaf
+    // blades radiating outward in a flat star — the leaves are not a token
+    // collar, they're roughly as big as the fruit. Cabbage is the outlier:
+    // a bare lumpy head with no crown at all, which is why leafy/gourd/
+    // root/berry below (never shown clearly in the reference) keep the
+    // lump-cluster approach — only the three families actually visible in
+    // the reference (corn/eggplant/tomato) switch to leafCrown.
     const FAM3D = {
       root: (color, ripe) => {
         const g = new THREE.Group();
-        g.add(lumpCluster(FOLIAGE, foliageLumps(4, ripe ? 0.16 : 0.4, ripe ? 0.5 : 0.6)));
+        // the steeper V6d bake camera looks down at the bulb, so the
+        // foliage collar needs a radius bigger than the bulb's or it's
+        // fully hidden behind it — verified via the debug grid (turnip
+        // rendered as a bare white egg with the old, too-small collar)
+        g.add(lumpCluster(FOLIAGE, foliageLumps(5, ripe ? 0.02 : 0.4, ripe ? 1.0 : 0.6)));
         if (ripe) {
           const bulb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.23, 1), lambert(color));
           bulb.scale.set(1, 0.85, 1); bulb.position.y = 0.19; g.add(bulb);
@@ -1845,66 +1947,54 @@ function bakeCropSprites3D() {
         const scale = ripe ? 1.4 : 0.75;
         return lumpCluster(ripe ? color : FOLIAGE, foliageLumps(6, ripe ? 0.15 : 0.3, scale));
       },
-      // tomato: a low leafy bush with fruit sitting on top (reference keeps
-      // more foliage here than eggplant/corn — the bush is visibly green)
+      // tomato: a radiating leaf crown with two big round fruit nested on
+      // top of it — leaves and fruit are comparable in visual weight
       vine: (color, ripe) => {
         const g = new THREE.Group();
-        if (!ripe) {
-          g.add(lumpCluster(FOLIAGE, foliageLumps(5, 0.46, 0.7)));
-          const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.5, 6), lambert(STEM));
-          stem.position.y = 0.25; g.add(stem);
-          return g;
-        }
-        g.add(lumpCluster(FOLIAGE, foliageLumps(5, 0.18, 0.6)));
+        g.add(leafCrown(7, FOLIAGE, ripe ? 0.4 : 0.32, ripe ? 0.3 : 0.55));
+        if (!ripe) return g;
         const fruitMat = lambert(color);
-        const spots = [[-0.12, 0.3, 0.09, 0.15], [0.13, 0.36, -0.05, 0.14], [0, 0.22, -0.12, 0.13]];
+        const spots = [[-0.07, 0.24, 0.06, 0.115], [0.08, 0.27, -0.05, 0.11]];
         for (const [x, y, z, r] of spots) {
           const f = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), fruitMat);
           f.position.set(x, y, z); g.add(f);
         }
         return g;
       },
-      // eggplant: almost all fruit — a tight stack of big glossy ovoids
-      // with only a thin leaf fringe at the base, per the reference
+      // eggplant: same leaf-crown base as tomato/corn, with 2-4 rounded
+      // (not elongated) purple bulbs sitting on top of the leaves
       cluster: (color, ripe) => {
         const g = new THREE.Group();
-        g.add(lumpCluster(FOLIAGE, foliageLumps(3, ripe ? 0.06 : 0.32, ripe ? 0.3 : 0.55)));
+        g.add(leafCrown(7, FOLIAGE, ripe ? 0.38 : 0.3, ripe ? 0.3 : 0.55));
         if (!ripe) return g;
         const fruitMat = lambert(color);
-        const spots = [[-0.1, 0.24, 0.05, 0.6], [0.1, 0.3, -0.04, -0.5], [0, 0.15, -0.1, 0.2], [0.02, 0.4, 0.06, 0.1]];
-        for (const [x, y, z, tilt] of spots) {
-          const f = new THREE.Mesh(new THREE.IcosahedronGeometry(0.1, 1), fruitMat);
-          f.scale.set(1, 1.7, 1); f.rotation.z = tilt; f.position.set(x, y, z); g.add(f);
+        const spots = [[-0.07, 0.22, 0.06, 0.095], [0.08, 0.25, -0.04, 0.09], [0, 0.16, -0.08, 0.08]];
+        for (const [x, y, z, r] of spots) {
+          const f = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), fruitMat);
+          f.scale.set(1, 1.15, 1); f.position.set(x, y, z); g.add(f);
         }
         return g;
       },
-      // corn: two big standing ears, no stalk once ripe — the user's own
-      // "giant ear of corn, not a corn plant" example
+      // corn: same leaf-crown radiating outward (the husk leaves, per the
+      // reference — large and part of the corn's own silhouette, not a
+      // separate plant), with a low bumpy cluster of kernel-yellow lumps
+      // nested in the center rather than tall smooth ears
       cob: (color, ripe) => {
         const g = new THREE.Group();
-        if (!ripe) {
-          g.add(lumpCluster(FOLIAGE, foliageLumps(4, 0.2, 0.65)));
-          const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.55, 6), lambert(STEM));
-          stem.position.y = 0.28; g.add(stem);
-          return g;
-        }
-        g.add(lumpCluster(FOLIAGE, foliageLumps(4, 0.06, 0.4)));
-        const cobMat = lambert(color);
-        for (const [ex, ez, tilt] of [[-0.1, 0.03, -0.1], [0.1, -0.03, 0.1]]) {
-          const cob = new THREE.Mesh(new THREE.IcosahedronGeometry(0.13, 1), cobMat);
-          cob.scale.set(1, 2.3, 1); cob.position.set(ex, 0.3, ez); cob.rotation.z = tilt;
-          g.add(cob);
-          const husk = new THREE.Mesh(new THREE.ConeGeometry(0.145, 0.18, 6, 1, true), lambert(FOLIAGE_LT));
-          husk.position.set(ex, 0.08, ez); husk.rotation.z = tilt;
-          husk.material.side = THREE.DoubleSide;
-          g.add(husk);
+        g.add(leafCrown(8, FOLIAGE, ripe ? 0.44 : 0.34, ripe ? 0.32 : 0.6));
+        if (!ripe) return g;
+        const kernelMat = lambert(color);
+        const bumps = [[0, 0.15, 0, 0.095], [0.07, 0.17, 0.04, 0.08], [-0.07, 0.16, -0.04, 0.08], [0.02, 0.21, -0.05, 0.075], [-0.04, 0.2, 0.05, 0.07]];
+        for (const [x, y, z, r] of bumps) {
+          const b = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), kernelMat);
+          b.position.set(x, y, z); g.add(b);
         }
         return g;
       },
       gourd: (color, ripe) => {
         const g = new THREE.Group();
         if (!ripe) { g.add(lumpCluster(FOLIAGE, foliageLumps(5, 0.28, 0.8))); return g; }
-        g.add(lumpCluster(FOLIAGE, foliageLumps(3, 0.1, 0.4)));
+        g.add(lumpCluster(FOLIAGE, foliageLumps(4, 0.1, 1.15)));
         const gourd = new THREE.Mesh(new THREE.IcosahedronGeometry(0.29, 1), lambert(color));
         gourd.scale.set(1, 0.82, 1); gourd.position.y = 0.24; g.add(gourd);
         const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.035, 0.1, 6), lambert(STEM));
