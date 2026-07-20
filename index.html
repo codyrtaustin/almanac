@@ -201,6 +201,27 @@
     as a real rustic-diorama street now, not flat colored boxes.
   Verified: full Year-1 regression (intro/plant/fair/harvest/ship) at 60fps,
   zero console errors, $216 shipment math untouched.
+
+  V5 — CHARACTER GEOMETRY REBUILD (user feedback: "not 3D enough / built out
+  enough"). This is a TECHNIQUE change to our own original chibi model —
+  rounder, more sculpted construction — not a copy of the reference's actual
+  character designs; that line (technique yes, expression never) is the rule
+  this whole project has run on since the HM64 mechanics pass, restated
+  explicitly here because the request could be misread as asking for literal
+  replication. makeChibi() rebuilt: flat boxes replaced with cylinders and
+  sphere-stacks (legs = thigh cylinder + shoe-cap sphere, arms = upper-arm
+  cylinder + mitt sphere, torso = barrel cylinder + chest bulge + rounded hip,
+  a neck cylinder separating head from body, a soft chin-taper on the head
+  scale, layered hair with a back-drape for long-hair characters). legs[]/
+  arms[] are now pivot GROUPS instead of raw meshes so the existing swing-
+  animation code (which only ever sets .rotation.x) kept working with no
+  changes elsewhere. Verified two ways: a raw close-up of the live geometry
+  (bypassing the sprite bake) shows the neck/torso/shoe detail directly, and
+  — more importantly, since sprites are what actually ships — the baked
+  in-game sprite atlas was pulled and inspected directly, confirming the
+  built-out geometry survives baking and reads in every walk-cycle frame.
+  Full Year-1 regression re-run after: 60fps, zero console errors, all 12
+  villagers render correctly at the County Fair, $216 shipment math intact.
 -->
 <style>
   :root {
@@ -2450,42 +2471,73 @@ const HAIRS = ['#5A4030', '#2E2620', '#B08040', '#C4643C', '#8C8C84', '#E0C070']
 // option in the picker without touching the brand hue.
 const SHIRTS = ['#5E8E8A', '#B3574C', '#7E8A5E', '#B99A6B', '#6A6AA0', '#C48A3C'];
 
+// Built out for real dimensionality (user feedback: "not 3D enough"):
+// cylinders and sphere-stacks in place of flat boxes, a neck to separate
+// head from body, hands and shoe-caps to ground the silhouette, a rounded
+// hip/belly bulge for the stubby "clay figure" proportions the style guide
+// calls for. No CapsuleGeometry (r128 doesn't have it) — cylinders + spheres
+// throughout. legs[]/arms[] are now pivot GROUPS (thigh+shoe, upper+mitt)
+// so the existing swing-animation code (which only sets .rotation.x) keeps
+// working unchanged; the pivot sits at the hip/shoulder in both cases.
 function makeChibi(rec) {
   const g = new THREE.Group();
   const skin = lambert(rec.skin), hair = lambert(rec.hair);
   const shirt = lambert(rec.shirt), pants = lambert(rec.pants || '#6b5a44');
+  const shoeMat = lambert('#3E3226');
   const legs = [], arms = [];
-  for (const sx of [-0.1, 0.1]) {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.15, 0.32, 0.15), pants);
-    leg.position.set(sx, 0.16, 0);
-    leg.geometry.translate(0, -0.14, 0); leg.position.y = 0.3;
+  for (const sx of [-0.11, 0.11]) {
+    const leg = new THREE.Group();
+    const thigh = new THREE.Mesh(new THREE.CylinderGeometry(0.075, 0.095, 0.3, 8), pants);
+    thigh.position.y = -0.15; leg.add(thigh);
+    const shoe = new THREE.Mesh(new THREE.SphereGeometry(0.1, 8, 6), shoeMat);
+    shoe.scale.set(1, 0.55, 1.35); shoe.position.set(0, -0.31, 0.02); leg.add(shoe);
+    leg.position.set(sx, 0.33, 0);
     g.add(leg); legs.push(leg);
   }
-  const body = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.44, 0.28), shirt);
-  body.position.y = 0.52; g.add(body);
+  // rounded hip/belly bulge under the torso for stubby, sculpted proportions
+  const hip = new THREE.Mesh(new THREE.SphereGeometry(0.23, 10, 7), pants);
+  hip.scale.set(1, 0.62, 0.95); hip.position.y = 0.35; g.add(hip);
+  // torso: a barrel cylinder (rounder than a box), gentle taper to the chest
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.185, 0.225, 0.4, 10), shirt);
+  body.position.y = 0.54; g.add(body);
+  const chest = new THREE.Mesh(new THREE.SphereGeometry(0.2, 10, 7), shirt);
+  chest.scale.set(1, 0.85, 0.9); chest.position.y = 0.72; g.add(chest);
+  const neck = new THREE.Mesh(new THREE.CylinderGeometry(0.095, 0.11, 0.09, 8), skin);
+  neck.position.y = 0.83; g.add(neck);
   for (const sx of [-0.28, 0.28]) {
-    const arm = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.36, 0.11), shirt);
-    arm.geometry.translate(0, -0.14, 0);
+    const arm = new THREE.Group();
+    const upper = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.07, 0.32, 8), shirt);
+    upper.position.y = -0.16; arm.add(upper);
+    const mitt = new THREE.Mesh(new THREE.SphereGeometry(0.075, 8, 6), skin);
+    mitt.position.y = -0.34; arm.add(mitt);
     arm.position.set(sx, 0.7, 0); g.add(arm); arms.push(arm);
   }
-  const head = new THREE.Mesh(new THREE.SphereGeometry(0.34, 10, 8), skin);
-  head.position.y = 1.05; g.add(head);
-  const hairM = new THREE.Mesh(new THREE.SphereGeometry(0.365, 10, 8,
-    0, Math.PI * 2, 0, Math.PI * 0.55), hair);
-  hairM.position.y = 1.1; g.add(hairM);
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.34, 12, 10), skin);
+  head.scale.set(1, 0.97, 0.93);   // a soft taper toward the chin, sculpted not spherical
+  head.position.y = 1.06; g.add(head);
+  const cheeks = new THREE.Mesh(new THREE.SphereGeometry(0.34, 12, 10), skin);
+  cheeks.scale.set(1.04, 0.9, 0.97); cheeks.position.set(0, 1.0, 0.02); g.add(cheeks);
+  const hairM = new THREE.Mesh(new THREE.SphereGeometry(0.375, 12, 10,
+    0, Math.PI * 2, 0, Math.PI * 0.56), hair);
+  hairM.position.y = 1.12; g.add(hairM);
   if (rec.long) {
-    const back = new THREE.Mesh(new THREE.BoxGeometry(0.4, 0.5, 0.16), hair);
-    back.position.set(0, 0.85, -0.2); g.add(back);
+    for (const sx of [-0.16, 0.16]) {
+      const drape = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.05, 0.46, 7), hair);
+      drape.position.set(sx, 0.86, -0.12); drape.rotation.z = sx > 0 ? -0.12 : 0.12;
+      g.add(drape);
+    }
+    const back = new THREE.Mesh(new THREE.SphereGeometry(0.28, 8, 6), hair);
+    back.scale.set(1, 1.1, 0.55); back.position.set(0, 0.98, -0.2); g.add(back);
   }
   for (const ex of [-0.12, 0.12]) {
     const eye = new THREE.Mesh(new THREE.SphereGeometry(0.038, 6, 5), lambert('#2E2620'));
-    eye.position.set(ex, 1.06, 0.3); g.add(eye);
+    eye.position.set(ex, 1.07, 0.31); g.add(eye);
   }
   if (rec.hat) {
     const brim = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 0.05, 10), lambert(rec.hat));
-    brim.position.y = 1.3; g.add(brim);
+    brim.position.y = 1.32; g.add(brim);
     const top = new THREE.Mesh(new THREE.CylinderGeometry(0.26, 0.3, 0.22, 10), lambert(rec.hat));
-    top.position.y = 1.42; g.add(top);
+    top.position.y = 1.44; g.add(top);
   }
   g.userData = { legs, arms };
   return g;
