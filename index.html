@@ -222,6 +222,69 @@
   built-out geometry survives baking and reads in every walk-cycle frame.
   Full Year-1 regression re-run after: 60fps, zero console errors, all 12
   villagers render correctly at the County Fair, $216 shipment math intact.
+
+  V6 — CROPS AS BAKED 3D GEOMETRY (user feedback: "why don't the vegetables
+  have the same chonky big look... just recreate that"). Diagnosis: v4's
+  flat-painted vector crops weren't a size problem, they were a technique
+  problem — a hand-drawn 2D fill reads as a sticker no matter how large,
+  while the reference's density comes from real dimensional SHADING on
+  rounded volumes. Rebuilt crops on the same baked-3D-geometry pipeline
+  already proven for trees/props/characters this session: chunky primitives
+  (lump-cluster foliage, sphere-stack fruit) lit by a headlamp light and
+  baked to a sprite, not painted. Sunflower (family 'flower') is explicitly
+  EXCLUDED and kept on the old flat-painted path — stays exactly as liked.
+  A real bug surfaced and got fixed during this pass, logged here in the
+  interest of an honest build record: the first camera framing (copied
+  proportionally from the tree/prop bake's asymmetric bottom=0 frustum)
+  rendered every crop sprite BLANK — confirmed empirically with a debug
+  render (a test sphere at the same framing produced zero non-background
+  pixels) before touching the real geometry. A symmetric frustum centered
+  on the view axis, tuned by iterating on the same debug sphere, fixed it
+  (~450 of ~3200 pixels filled, no clipping) and is now what every crop
+  bakes through. Verified after the fix: all 8 rebuilt crops (turnip,
+  potato, cabbage, tomato, corn, eggplant, strawberry, pumpkin) render with
+  visible dimensional shading and fill their tiles; sunflower unchanged;
+  full Year-1 regression at 60fps, zero console errors, $216 math intact.
+
+  V6b — SUNFLOWER + FORAGE ONTO THE SAME PIPELINE (user follow-up: "sunflower
+  needs it [3D geometry] too, do a review"). Reversed the v6 sunflower
+  exclusion — the flat-painted sunflower stood out as the one sticker next
+  to baked-3D neighbors even though its color/silhouette was liked, so
+  FAM3D.flower rebuilds that same yellow-petal/brown-disc language from real
+  primitives (a radial ring of flattened box petals + a speckled cylinder
+  disc on a stem), paintFlowerSprites() removed as dead code. Review of the
+  rest of the game for the same flat-vs-3D gap found one more instance: the
+  9-11 forage pickups (mushroom, walnut, berries, wintergreen, pinecone,
+  daffodil, wildleek, honeycomb, worm, fern, shell) were raw emoji glyphs
+  painted onto a billboard via emojiTex() — the exact same "sticker in a lit
+  3D world" problem crops had. Rebuilt all of them as small baked-3D
+  clusters on the same renderer/frustum, keyed 'forage_<id>' in the shared
+  CropSprites bank, with an emoji fallback only if the bake doesn't run.
+  Two world-space glyphs were reviewed and deliberately left flat: the
+  shop-connection checkmark and the mailbox flag are status indicators, not
+  objects with volume — matching the Art Bible's UI-chrome register, not the
+  world-object one. Portraits and item-grid icons are also correctly out of
+  scope for the same reason (distinct visual registers, not oversights).
+
+  V6c — CROPS MATCHED AGAINST A REAL HM64 SCREENSHOT (user: "the crops don't
+  look the same... it should be a giant ear of corn rather than a corn
+  plant"). Pulled a real farm-field screenshot (RPGFan's HM64 gallery) and
+  did an actual side-by-side. The fact that carried over — a ratio, not any
+  traced art — is that a ripe HM64 crop tile IS the harvestable item,
+  oversized, sitting straight on the ground; foliage is a thin collar
+  underneath it, not a stem-and-leaves plant wearing the fruit as an
+  accessory. Every FAM3D ripe-stage generator was rebuilt on that ratio:
+  visible stems removed from ripe corn/tomato/eggplant, foliage lumps pulled
+  down near the ground and shrunk, fruit primitives sized up so they
+  dominate the silhouette. Corn specifically is now two big standing ears
+  with a leaf collar and no stalk — the user's own example. Eggplant split
+  off the shared 'vine' family into its own 'cluster' family (almost all
+  fruit, per the reference) since tomato keeps more visible bush than
+  eggplant does. Verified by pulling the live CropSprites bank into an
+  on-page debug grid and by force-planting corn/eggplant/tomato in the live
+  3D world at close camera range — both match the reference construction.
+  Full Year-1 regression after: 60fps, zero console errors, harvest adds the
+  right items to inventory.
 -->
 <style>
   :root {
@@ -1657,169 +1720,409 @@ const CropSprites = {};   // cropId -> [stage0..stage3] textures, plus 'dead'
 const CROP_FAMILY = {
   turnip: 'root', potato: 'root',
   cabbage: 'leafy',
-  tomato: 'vine', eggplant: 'vine',
+  tomato: 'vine', eggplant: 'cluster',
   corn: 'cob',
   pumpkin: 'gourd',
   sunflower: 'flower',
   strawberry: 'berry'
 };
 const FOLIAGE = '#4E7A48', FOLIAGE_LT = '#5E8A55', STEM = '#3E6A3E';
-function paintCropSprites() {
-  const W = 32, H = 48;
-  const mk = painter => {
-    const c = document.createElement('canvas');
-    c.width = W; c.height = H;
-    painter(c.getContext('2d'));
-    quantizeCanvas(c, 14);
-    return nearestTex(c);
-  };
-  const hexOf = n => '#' + n.toString(16).padStart(6, '0');
-  const hi = (c, x, y, w, h) => { c.fillStyle = 'rgba(255,255,255,0.4)'; c.fillRect(x, y, w, h); };
-  CropSprites.stage0 = mk(c => {   // shared seed mound
-    c.fillStyle = '#6B5844';
-    c.beginPath(); c.ellipse(16, 42, 7, 3, 0, 0, 7); c.fill();
-    c.fillStyle = FOLIAGE; c.fillRect(14, 37, 4, 5);
-  });
-  CropSprites.stage1 = mk(c => {   // shared sprout
-    c.strokeStyle = FOLIAGE; c.lineWidth = 3; c.lineCap = 'round';
-    c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 30); c.stroke();
-    c.beginPath(); c.moveTo(16, 34); c.lineTo(9, 26); c.moveTo(16, 34); c.lineTo(23, 26); c.stroke();
-  });
-  CropSprites.dead = mk(c => {     // the reaper's leavings — a withered stalk
-    c.strokeStyle = '#8A7A66'; c.lineWidth = 3; c.lineCap = 'round';
-    c.beginPath(); c.moveTo(16, 44); c.lineTo(13, 22); c.stroke();
-    c.beginPath(); c.moveTo(14, 30); c.lineTo(7, 26); c.moveTo(15, 26); c.lineTo(20, 21); c.stroke();
-    c.fillStyle = '#6E5A48'; c.beginPath(); c.ellipse(13, 20, 4, 3, 0.3, 0, 7); c.fill();
-  });
+// Crops as BAKED 3D GEOMETRY, not painted flat vectors (user feedback: the
+// vegetables didn't read "chonky" like the reference). A flat vector fill —
+// no matter how big — reads as a sticker; the reference's density comes from
+// real dimensional shading on rounded forms. Same pipeline as the tree/prop
+// bake below: chunky primitives lit by the headlamp light, baked to a sprite,
+// CI4-quantized. V6b: sunflower (family 'flower') moved onto this same
+// pipeline too — the old flat-painted sunflower read as a sticker next to
+// baked-3D neighbors even though its color/silhouette was liked; the new
+// build keeps that same yellow-petal / brown-disc language, just built from
+// real petal, disc and stem primitives instead of canvas paint.
+const hexOf = n => '#' + n.toString(16).padStart(6, '0');
+function lumpCluster(color, lumps) {
+  const g = new THREE.Group();
+  const mat = lambert(color);
+  for (const [lx, ly, lz, lr] of lumps) {
+    const m = new THREE.Mesh(new THREE.IcosahedronGeometry(lr, 1), mat);
+    m.position.set(lx, ly, lz); g.add(m);
+  }
+  return g;
+}
+function bakeCropSprites3D() {
+  if (!CONFIG.BAKE_SPRITES) return;
+  let rend = null;
+  try {
+    rend = new THREE.WebGLRenderer({ antialias: false, alpha: true, preserveDrawingBuffer: true });
+    rend.setPixelRatio(1);
+    const scene = new THREE.Scene();
+    scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+    const dir = new THREE.DirectionalLight(0xfff4e0, 0.6);
+    dir.position.set(0, 2.2, 1.8); scene.add(dir); scene.add(dir.target);
+    dir.target.position.set(0, 0.4, 0); dir.target.updateMatrixWorld();
+    const bake = (key, buildFn, px) => {
+      const model = buildFn();
+      scene.add(model);
+      const worldW = 1.15, worldH = 1.6;
+      const pw = px || 48, ph = Math.round(pw * worldH / worldW);
+      rend.setSize(pw, ph, false);
+      // Symmetric frustum centered on the view axis — an asymmetric
+      // bottom=0 frustum (the pattern the tree/prop bake uses) does not
+      // scale down to crop-sized objects; verified empirically (a test
+      // sphere rendered zero pixels with the asymmetric version, ~450px
+      // filled with this one) before wiring it in here.
+      const cam = new THREE.OrthographicCamera(-worldW / 2, worldW / 2, 0.42, -0.42, 0.1, 20);
+      cam.position.set(0, 0.4, 0.85); cam.lookAt(0, 0.35, 0);
+      rend.setClearColor(0x000000, 0);
+      rend.render(scene, cam);
+      const canvas = document.createElement('canvas');
+      canvas.width = pw; canvas.height = ph;
+      canvas.getContext('2d').drawImage(rend.domElement, 0, 0);
+      quantizeCanvas(canvas, 16);
+      scene.remove(model);
+      CropSprites[key] = nearestTex(canvas);
+    };
 
-  const leafCluster = (c, cx, cy, r) => {
-    c.fillStyle = FOLIAGE;
-    c.beginPath(); c.ellipse(cx, cy, r * 1.1, r * 0.75, 0, 0, 7); c.fill();
-    c.fillStyle = FOLIAGE_LT;
-    c.beginPath(); c.ellipse(cx - r * 0.6, cy - r * 0.3, r * 0.6, r * 0.45, 0.3, 0, 7); c.fill();
-    c.beginPath(); c.ellipse(cx + r * 0.6, cy - r * 0.2, r * 0.6, r * 0.45, -0.3, 0, 7); c.fill();
-  };
+    const foliageLumps = (n, baseY, scale) => {
+      const pts = [];
+      for (let i = 0; i < n; i++) {
+        const a = i / n * Math.PI * 2;
+        pts.push([Math.cos(a) * 0.16 * scale, baseY + (i % 2) * 0.05 * scale, Math.sin(a) * 0.1 * scale, 0.13 * scale]);
+      }
+      pts.push([0, baseY + 0.1 * scale, 0, 0.15 * scale]);
+      return pts;
+    };
 
-  // Reference calibration: HM64's ripe crops are large, glossy, and dense —
-  // fruit fills most of the tile and every one gets a real specular pop, not
-  // a single highlight pixel. Bigger fills + a shadow crease + a stronger
-  // gloss streak on each fruit below chase that read while staying original.
-  const gloss = (c, x, y, w, h, rot) => {
-    c.save(); c.translate(x, y); if (rot) c.rotate(rot);
-    c.fillStyle = 'rgba(255,255,255,0.55)';
-    c.beginPath(); c.ellipse(0, 0, w, h, 0, 0, 7); c.fill();
-    c.restore();
-  };
-  const shade = (c, x, y, r) => {
-    c.fillStyle = 'rgba(40,30,20,0.18)';
-    c.beginPath(); c.ellipse(x, y, r, r * 0.7, 0.6, 0, 7); c.fill();
-  };
-  const FAM = {
-    root: (c, color, ripe) => {
-      leafCluster(c, 16, ripe ? 15 : 18, ripe ? 10 : 6);
-      c.strokeStyle = STEM; c.lineWidth = 2;
-      c.beginPath(); c.moveTo(16, 30); c.lineTo(16, 21); c.stroke();
-      if (ripe) {
-        c.fillStyle = color;
-        c.beginPath(); c.ellipse(16, 37, 9, 10, 0, 0, 7); c.fill();
-        shade(c, 19, 40, 4);
-        gloss(c, 12, 32, 2.6, 5, -0.3);
+    // shared stages
+    bake('stage0', () => {
+      const g = new THREE.Group();
+      const mound = new THREE.Mesh(new THREE.IcosahedronGeometry(0.14, 0), lambert('#6B5844'));
+      mound.scale.set(1, 0.5, 1); mound.position.y = 0.06; g.add(mound);
+      const tip = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.1, 5), lambert(FOLIAGE));
+      tip.position.y = 0.14; g.add(tip);
+      return g;
+    });
+    bake('stage1', () => {
+      const g = new THREE.Group();
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.025, 0.26, 6), lambert(FOLIAGE));
+      stem.position.y = 0.13; g.add(stem);
+      for (const sx of [-1, 1]) {
+        const leaf = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.16, 5), lambert(FOLIAGE_LT));
+        leaf.position.set(sx * 0.08, 0.22, 0); leaf.rotation.z = sx * 0.9;
+        g.add(leaf);
       }
-    },
-    leafy: (c, color, ripe) => {
-      const r = ripe ? 13 : 7;
-      c.fillStyle = FOLIAGE_LT;
-      for (let i = 0; i < 7; i++) {
-        const a = i / 7 * Math.PI * 2;
-        c.beginPath();
-        c.ellipse(16 + Math.cos(a) * r * 0.72, 34 + Math.sin(a) * r * 0.5, r * 0.7, r * 0.44, a, 0, 7);
-        c.fill();
-      }
-      c.fillStyle = ripe ? color : FOLIAGE;
-      c.beginPath(); c.ellipse(16, 33, r * 0.75, r * 0.6, 0, 0, 7); c.fill();
-      if (ripe) { shade(c, 20, 37, 5); gloss(c, 12, 29, 3.4, 2.2, -0.4); }
-    },
-    vine: (c, color, ripe) => {
-      leafCluster(c, 16, ripe ? 21 : 22, ripe ? 11 : 7);
-      c.strokeStyle = STEM; c.lineWidth = 2;
-      c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 24); c.stroke();
-      if (ripe) {
-        const spots = [[9, 21, 4], [22, 18, 3.6], [15, 27, 3.2], [24, 29, 2.8]];
-        c.fillStyle = color;
-        for (const [x, y, r] of spots) { c.beginPath(); c.arc(x, y, r, 0, 7); c.fill(); }
-        for (const [x, y, r] of spots) shade(c, x + r * 0.4, y + r * 0.4, r * 0.55);
-        for (const [x, y, r] of spots) gloss(c, x - r * 0.35, y - r * 0.4, r * 0.4, r * 0.24, -0.4);
-      }
-    },
-    cob: (c, color, ripe) => {
-      leafCluster(c, 16, 38, 6);
-      c.strokeStyle = STEM; c.lineWidth = 3;
-      c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 16); c.stroke();
-      if (ripe) {
-        for (const [ex, ey, er, rot] of [[19, 22, 1, 0.5], [12, 26, 0.85, -0.6]]) {
-          c.save(); c.translate(ex, ey); c.rotate(rot); c.scale(er, er);
-          c.fillStyle = color; c.beginPath(); c.ellipse(0, 0, 3.6, 9.4, 0, 0, 7); c.fill();
-          c.fillStyle = 'rgba(62,50,38,0.4)';
-          for (let y = -7; y < 8; y += 2.6) c.fillRect(-3.6, y, 7.2, 1);
-          gloss(c, -1.4, -4, 1.4, 4, 0);
-          c.fillStyle = FOLIAGE_LT;
-          c.beginPath(); c.ellipse(-1, 6.5, 3.4, 6.5, 0.2, 0, 7); c.fill();
-          c.restore();
+      return g;
+    });
+    bake('dead', () => {
+      const g = new THREE.Group();
+      const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.03, 0.32, 6), lambert('#8A7A66'));
+      stem.position.set(0.02, 0.16, 0); stem.rotation.z = 0.25; g.add(stem);
+      const head = new THREE.Mesh(new THREE.IcosahedronGeometry(0.1, 0), lambert('#6E5A48'));
+      head.scale.set(1, 0.7, 1); head.position.set(0.08, 0.3, 0); g.add(head);
+      return g;
+    });
+
+    // V6c — matched against a real HM64 farm-field screenshot (RPGFan
+    // gallery) at the user's request. The fact that carries over (a ratio,
+    // not any traced art): a ripe HM64 crop tile is the harvestable item
+    // itself, oversized, sitting directly on the ground — 2-4 big fruit/veg
+    // shapes filling most of the silhouette, with the plant reduced to a
+    // thin foliage collar peeking from underneath. It is NOT a stem-and-
+    // leaves plant wearing small fruit as an accessory. Concretely: no
+    // visible stem on any ripe stage below, foliage lumps pulled down near
+    // the ground and shrunk, and every fruit/veg primitive sized up so it
+    // dominates the read. Corn in particular — the user's own example — is
+    // now two big standing ears with a leaf collar, no stalk.
+    const FAM3D = {
+      root: (color, ripe) => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(4, ripe ? 0.16 : 0.4, ripe ? 0.5 : 0.6)));
+        if (ripe) {
+          const bulb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.23, 1), lambert(color));
+          bulb.scale.set(1, 0.85, 1); bulb.position.y = 0.19; g.add(bulb);
         }
-      }
-    },
-    gourd: (c, color, ripe) => {
-      if (!ripe) { leafCluster(c, 16, 30, 8); return; }
-      leafCluster(c, 8, 37, 5);
-      c.fillStyle = color;
-      c.beginPath(); c.ellipse(17, 35, 13, 11, 0, 0, 7); c.fill();
-      c.strokeStyle = 'rgba(62,50,38,0.35)'; c.lineWidth = 1.6;
-      for (const dx of [-7, -2.3, 2.3, 7]) { c.beginPath(); c.ellipse(17 + dx * 0.3, 35, 3.2, 10.5, 0, 0, 7); c.stroke(); }
-      c.fillStyle = STEM; c.fillRect(15, 23, 3.5, 5.5);
-      shade(c, 24, 40, 6);
-      gloss(c, 10, 29, 3.4, 4.4, -0.4);
-    },
-    flower: (c, color, ripe) => {
-      c.strokeStyle = STEM; c.lineWidth = 3;
-      c.beginPath(); c.moveTo(16, 44); c.lineTo(16, ripe ? 16 : 22); c.stroke();
-      leafCluster(c, 11, 34, 4);
-      if (ripe) {
-        c.fillStyle = color;
-        for (let i = 0; i < 10; i++) {
-          const a = i / 10 * Math.PI * 2;
-          c.beginPath(); c.ellipse(16 + Math.cos(a) * 8, 14 + Math.sin(a) * 8, 3.2, 1.8, a, 0, 7); c.fill();
+        return g;
+      },
+      leafy: (color, ripe) => {
+        const scale = ripe ? 1.4 : 0.75;
+        return lumpCluster(ripe ? color : FOLIAGE, foliageLumps(6, ripe ? 0.15 : 0.3, scale));
+      },
+      // tomato: a low leafy bush with fruit sitting on top (reference keeps
+      // more foliage here than eggplant/corn — the bush is visibly green)
+      vine: (color, ripe) => {
+        const g = new THREE.Group();
+        if (!ripe) {
+          g.add(lumpCluster(FOLIAGE, foliageLumps(5, 0.46, 0.7)));
+          const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.5, 6), lambert(STEM));
+          stem.position.y = 0.25; g.add(stem);
+          return g;
         }
-        c.fillStyle = '#6E5A38';
-        c.beginPath(); c.arc(16, 14, 5, 0, 7); c.fill();
-        c.fillStyle = 'rgba(0,0,0,0.15)';
-        for (let i = 0; i < 5; i++) c.fillRect(13 + rand('live') * 6, 11 + rand('live') * 6, 1, 1);
-      }
-    },
-    berry: (c, color, ripe) => {
-      leafCluster(c, 16, 34, ripe ? 10 : 6);
-      if (ripe) {
-        const spots = [[10, 38, 3.2], [21, 39, 3.4], [16, 43, 3], [24, 34, 2.6]];
-        c.fillStyle = color;
-        for (const [x, y, r] of spots) {
-          c.beginPath(); c.moveTo(x, y - r);
-          c.bezierCurveTo(x + r, y - r, x + r, y + r * 0.4, x, y + r);
-          c.bezierCurveTo(x - r, y + r * 0.4, x - r, y - r, x, y - r);
-          c.fill();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(5, 0.18, 0.6)));
+        const fruitMat = lambert(color);
+        const spots = [[-0.12, 0.3, 0.09, 0.15], [0.13, 0.36, -0.05, 0.14], [0, 0.22, -0.12, 0.13]];
+        for (const [x, y, z, r] of spots) {
+          const f = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), fruitMat);
+          f.position.set(x, y, z); g.add(f);
         }
-        for (const [x, y, r] of spots) shade(c, x + r * 0.3, y + r * 0.3, r * 0.5);
-        c.fillStyle = '#F2E8CE';
-        for (let i = 0; i < 3; i++) c.fillRect(9 + i * 5, 29 + (i % 2) * 3, 2, 2);
-        c.fillStyle = 'rgba(255,255,255,0.5)';
-        for (const [x, y, r] of spots) c.fillRect(x - r * 0.35, y - r * 0.55, 1.8, 1.8);
+        return g;
+      },
+      // eggplant: almost all fruit — a tight stack of big glossy ovoids
+      // with only a thin leaf fringe at the base, per the reference
+      cluster: (color, ripe) => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(3, ripe ? 0.06 : 0.32, ripe ? 0.3 : 0.55)));
+        if (!ripe) return g;
+        const fruitMat = lambert(color);
+        const spots = [[-0.1, 0.24, 0.05, 0.6], [0.1, 0.3, -0.04, -0.5], [0, 0.15, -0.1, 0.2], [0.02, 0.4, 0.06, 0.1]];
+        for (const [x, y, z, tilt] of spots) {
+          const f = new THREE.Mesh(new THREE.IcosahedronGeometry(0.1, 1), fruitMat);
+          f.scale.set(1, 1.7, 1); f.rotation.z = tilt; f.position.set(x, y, z); g.add(f);
+        }
+        return g;
+      },
+      // corn: two big standing ears, no stalk once ripe — the user's own
+      // "giant ear of corn, not a corn plant" example
+      cob: (color, ripe) => {
+        const g = new THREE.Group();
+        if (!ripe) {
+          g.add(lumpCluster(FOLIAGE, foliageLumps(4, 0.2, 0.65)));
+          const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.04, 0.55, 6), lambert(STEM));
+          stem.position.y = 0.28; g.add(stem);
+          return g;
+        }
+        g.add(lumpCluster(FOLIAGE, foliageLumps(4, 0.06, 0.4)));
+        const cobMat = lambert(color);
+        for (const [ex, ez, tilt] of [[-0.1, 0.03, -0.1], [0.1, -0.03, 0.1]]) {
+          const cob = new THREE.Mesh(new THREE.IcosahedronGeometry(0.13, 1), cobMat);
+          cob.scale.set(1, 2.3, 1); cob.position.set(ex, 0.3, ez); cob.rotation.z = tilt;
+          g.add(cob);
+          const husk = new THREE.Mesh(new THREE.ConeGeometry(0.145, 0.18, 6, 1, true), lambert(FOLIAGE_LT));
+          husk.position.set(ex, 0.08, ez); husk.rotation.z = tilt;
+          husk.material.side = THREE.DoubleSide;
+          g.add(husk);
+        }
+        return g;
+      },
+      gourd: (color, ripe) => {
+        const g = new THREE.Group();
+        if (!ripe) { g.add(lumpCluster(FOLIAGE, foliageLumps(5, 0.28, 0.8))); return g; }
+        g.add(lumpCluster(FOLIAGE, foliageLumps(3, 0.1, 0.4)));
+        const gourd = new THREE.Mesh(new THREE.IcosahedronGeometry(0.29, 1), lambert(color));
+        gourd.scale.set(1, 0.82, 1); gourd.position.y = 0.24; g.add(gourd);
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.035, 0.1, 6), lambert(STEM));
+        stem.position.y = 0.47; g.add(stem);
+        return g;
+      },
+      berry: (color, ripe) => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(5, ripe ? 0.13 : 0.3, ripe ? 0.55 : 0.6)));
+        if (ripe) {
+          const fruitMat = lambert(color);
+          const spots = [[-0.13, 0.09, 0.09], [0.13, 0.08, -0.07], [0, 0.16, -0.11], [0.09, 0.04, 0.11]];
+          for (const [x, y, z] of spots) {
+            const berry = new THREE.Mesh(new THREE.IcosahedronGeometry(0.09, 1), fruitMat);
+            berry.scale.set(1, 1.15, 1); berry.position.set(x, y, z); g.add(berry);
+          }
+          const flowerMat = lambert('#F2E8CE');
+          for (let i = 0; i < 2; i++) {
+            const fl = new THREE.Mesh(new THREE.SphereGeometry(0.02, 5, 4), flowerMat);
+            fl.position.set(-0.05 + i * 0.14, 0.2, 0.02); g.add(fl);
+          }
+        }
+        return g;
+      },
+      // Sunflower: same liked color language (bright petal ring + brown
+      // speckled disc on a tall green stem) rebuilt as real geometry — a
+      // radial ring of flattened box petals facing the bake camera, a
+      // squat cylinder disc with seed-speckle bumps, on a taller stem than
+      // the other families (sunflowers read tall in the reference too).
+      flower: (color, ripe) => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(3, ripe ? 0.16 : 0.2, ripe ? 0.55 : 0.45)));
+        const stemH = ripe ? 0.48 : 0.3;
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.035, stemH, 6), lambert(STEM));
+        stem.position.y = stemH / 2; g.add(stem);
+        if (!ripe) {
+          const bud = new THREE.Mesh(new THREE.IcosahedronGeometry(0.07, 1), lambert(FOLIAGE_LT));
+          bud.position.y = stemH + 0.03; g.add(bud);
+          return g;
+        }
+        const headY = stemH + 0.02;
+        const petalMat = lambert(color);
+        const nPetals = 10;
+        for (let i = 0; i < nPetals; i++) {
+          const a = i / nPetals * Math.PI * 2;
+          const petal = new THREE.Mesh(new THREE.BoxGeometry(0.075, 0.19, 0.025), petalMat);
+          petal.position.set(Math.cos(a) * 0.135, headY + Math.sin(a) * 0.135, 0.03 + Math.abs(Math.sin(a)) * 0.015);
+          petal.rotation.z = a + Math.PI / 2;
+          g.add(petal);
+        }
+        const disc = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.05, 12), lambert('#6E5A38'));
+        disc.rotation.x = Math.PI / 2; disc.position.set(0, headY, 0.05); g.add(disc);
+        const speckMat = lambert('#4E3E28');
+        for (let i = 0; i < 6; i++) {
+          const sa = i * 1.7 + 0.4, sr = 0.02 + (i % 3) * 0.025;
+          const sp = new THREE.Mesh(new THREE.SphereGeometry(0.012, 5, 4), speckMat);
+          sp.position.set(Math.cos(sa) * sr, headY + Math.sin(sa) * sr, 0.075); g.add(sp);
+        }
+        return g;
       }
+    };
+
+    for (const id in CONFIG.CROPS) {
+      const color = hexOf(CONFIG.CROPS[id].color);
+      const fam = FAM3D[CROP_FAMILY[id] || 'vine'];
+      bake('mid_' + id, () => fam(color, false));
+      bake('ripe_' + id, () => fam(color, true));
     }
-  };
 
-  for (const id in CONFIG.CROPS) {
-    const color = hexOf(CONFIG.CROPS[id].color);
-    const fam = FAM[CROP_FAMILY[id] || 'vine'];
-    CropSprites['mid_' + id] = mk(c => fam(c, color, false));
-    CropSprites['ripe_' + id] = mk(c => fam(c, color, true));
+    // ---- forage pickups: same "phenomenon" as crops used to have — flat
+    // emoji billboards standing in a game world where everything else is
+    // lit 3D geometry. Rebuilt on the same bake pipeline/camera so a
+    // mushroom, a walnut, a sprig of wintergreen etc. all get real
+    // dimensional shading instead of a sticker glyph. CropSprites also
+    // holds these now, keyed 'forage_<id>'.
+    const forageIds = new Set(['worm']);
+    for (const season in CONFIG.FORAGE) for (const f of CONFIG.FORAGE[season]) forageIds.add(f.id);
+    const FORAGE_FAMILY = {
+      mushroom: 'mushroom', walnut: 'nut', berries: 'berrycluster',
+      wintergreen: 'herb', pinecone: 'cone',
+      daffodil: 'daffodil', wildleek: 'leek',
+      honeycomb: 'comb', worm: 'worm',
+      fern: 'fern', shell: 'shell'
+    };
+    const FORAGE_FAM3D = {
+      mushroom: () => {
+        const g = new THREE.Group();
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.045, 0.16, 6), lambert('#EDE3C8'));
+        stem.position.y = 0.08; g.add(stem);
+        const cap = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 6, 0, Math.PI * 2, 0, Math.PI / 2), lambert('#B5493A'));
+        cap.position.y = 0.16; g.add(cap);
+        const rim = new THREE.Mesh(new THREE.TorusGeometry(0.095, 0.015, 5, 10), lambert('#8F3A2E'));
+        rim.position.y = 0.155; rim.rotation.x = Math.PI / 2; g.add(rim);
+        return g;
+      },
+      nut: () => {
+        const g = new THREE.Group();
+        const mat = lambert('#7A5A38');
+        for (const [x, y, z, r] of [[-0.06, 0.06, 0.03, 0.09], [0.07, 0.05, -0.02, 0.085]]) {
+          const n = new THREE.Mesh(new THREE.IcosahedronGeometry(r, 1), mat);
+          n.position.set(x, y, z); g.add(n);
+        }
+        return g;
+      },
+      berrycluster: () => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE_LT, foliageLumps(3, 0.1, 0.4)));
+        const mat = lambert('#4A5FA8');
+        for (const [x, y, z] of [[-0.06, 0.14, 0.05], [0.05, 0.15, -0.03], [0, 0.19, 0.02]]) {
+          const b = new THREE.Mesh(new THREE.IcosahedronGeometry(0.045, 1), mat);
+          b.position.set(x, y, z); g.add(b);
+        }
+        return g;
+      },
+      herb: () => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(4, 0.13, 0.5)));
+        const mat = lambert('#B23B3B');
+        for (const [x, y, z] of [[-0.04, 0.17, 0.04], [0.05, 0.15, -0.02]]) {
+          const berry = new THREE.Mesh(new THREE.SphereGeometry(0.025, 5, 4), mat);
+          berry.position.set(x, y, z); g.add(berry);
+        }
+        return g;
+      },
+      cone: () => {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.ConeGeometry(0.07, 0.24, 8), lambert('#5E4630'));
+        body.position.y = 0.13; body.rotation.z = 0.5; g.add(body);
+        const ringMat = lambert('#6E5438');
+        for (let i = 0; i < 3; i++) {
+          const ring = new THREE.Mesh(new THREE.TorusGeometry(0.05 - i * 0.012, 0.012, 4, 8), ringMat);
+          ring.position.set(0.03 - i * 0.015, 0.06 + i * 0.06, 0);
+          ring.rotation.x = Math.PI / 2; ring.rotation.z = 0.5;
+          g.add(ring);
+        }
+        return g;
+      },
+      daffodil: () => {
+        const g = new THREE.Group();
+        g.add(lumpCluster(FOLIAGE, foliageLumps(3, 0.16, 0.4)));
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.024, 0.34, 6), lambert(STEM));
+        stem.position.y = 0.17; g.add(stem);
+        const headY = 0.36;
+        const petalMat = lambert('#F3E7A8');
+        for (let i = 0; i < 8; i++) {
+          const a = i / 8 * Math.PI * 2;
+          const petal = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.13, 0.015), petalMat);
+          petal.position.set(Math.cos(a) * 0.075, headY + Math.sin(a) * 0.075, 0.02);
+          petal.rotation.z = a + Math.PI / 2;
+          g.add(petal);
+        }
+        const trumpet = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.02, 0.05, 8), lambert('#E8A23C'));
+        trumpet.rotation.x = Math.PI / 2; trumpet.position.set(0, headY, 0.045);
+        g.add(trumpet);
+        return g;
+      },
+      leek: () => {
+        const g = new THREE.Group();
+        const bulb = new THREE.Mesh(new THREE.IcosahedronGeometry(0.06, 1), lambert('#E8E2C8'));
+        bulb.scale.set(1, 0.8, 1); bulb.position.y = 0.05; g.add(bulb);
+        const bladeMat = lambert(FOLIAGE_LT);
+        for (const [sx, rot] of [[-1, 0.25], [0, 0], [1, -0.2]]) {
+          const blade = new THREE.Mesh(new THREE.ConeGeometry(0.02, 0.32, 4), bladeMat);
+          blade.position.set(sx * 0.03, 0.24, 0); blade.rotation.z = rot; g.add(blade);
+        }
+        return g;
+      },
+      comb: () => {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 0.14, 6), lambert('#D8962E'));
+        body.rotation.z = Math.PI / 2; body.rotation.y = 0.3; body.position.y = 0.12; g.add(body);
+        const drip = new THREE.Mesh(new THREE.ConeGeometry(0.025, 0.05, 5), lambert('#C6841E'));
+        drip.position.set(0.03, 0.03, 0.06); g.add(drip);
+        return g;
+      },
+      worm: () => {
+        const g = new THREE.Group();
+        const mat = lambert('#D89A8C');
+        for (const [x, y, z, rot] of [[-0.08, 0.03, 0, 0.3], [-0.03, 0.05, 0.01, -0.2], [0.03, 0.04, -0.01, 0.35], [0.08, 0.02, 0, -0.15]]) {
+          const s = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.07, 6), mat);
+          s.position.set(x, y, z); s.rotation.z = rot; g.add(s);
+        }
+        return g;
+      },
+      fern: () => {
+        const g = new THREE.Group();
+        const mat = lambert(FOLIAGE_LT);
+        for (let i = 0; i < 3; i++) {
+          const frond = new THREE.Mesh(new THREE.TorusGeometry(0.045 + i * 0.012, 0.011, 4, 8, Math.PI * 1.4), mat);
+          frond.position.set((i - 1) * 0.05, 0.05 + i * 0.03, 0);
+          frond.rotation.z = 0.3 * i;
+          g.add(frond);
+        }
+        return g;
+      },
+      shell: () => {
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(new THREE.IcosahedronGeometry(0.1, 1), lambert('#D9CBA8'));
+        body.scale.set(1.3, 0.5, 1); body.position.y = 0.07; g.add(body);
+        const ridgeMat = lambert('#B8A47C');
+        for (let i = 0; i < 5; i++) {
+          const a = (i / 4 - 0.5) * 1.6;
+          const ridge = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.02, 0.09), ridgeMat);
+          ridge.position.set(Math.sin(a) * 0.08, 0.1, Math.cos(a) * 0.02);
+          ridge.rotation.y = a;
+          g.add(ridge);
+        }
+        return g;
+      }
+    };
+    for (const id of forageIds) {
+      const fam = FORAGE_FAM3D[FORAGE_FAMILY[id] || 'nut'];
+      bake('forage_' + id, fam, 64);
+    }
+  } catch (e) {
+    console.warn('crop 3D bake failed; sprites may be missing', e);
+  } finally {
+    if (rend) rend.dispose();
   }
 }
 /* ========================= RENDER: scene build =========================== */
@@ -2237,9 +2540,9 @@ function buildTileLayers(parent) {
   mk('log', new THREE.CylinderGeometry(0.3, 0.3, 1.4, 8), MAT.trunk);
   mk('sprinkler', new THREE.CylinderGeometry(0.1, 0.16, 0.5, 6), lambert('#8C9499'));
   // crops are painted sprite stages, billboarded like everything alive (§3)
-  // Art Bible §5: crop canvases are 32x48 (2:3) now, not square — taller
-  // sprites read as standing plants rather than flat pancakes on the soil.
-  const cropQuad = new THREE.PlaneGeometry(0.8, 1.2);
+  // Crops are baked from real 3D geometry now (chonky, per user feedback),
+  // matching the bake's own worldW/worldH framing so nothing looks stretched.
+  const cropQuad = new THREE.PlaneGeometry(1.05, 1.46);
   const sprMat = tex => new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.4 });
   mk('dead', cropQuad, sprMat(CropSprites.dead));
   mk('crop0', cropQuad, sprMat(CropSprites.stage0));
@@ -2281,11 +2584,11 @@ function rebuildTiles() {
     else if (t.obj) put(t.obj, x, t.obj === 'rock' ? 0.2 : 0.25, z);
     if (t.crop && !t.dead) {
       const vs = cropVisualStage(t);
-      if (vs === 3) put('ripe_' + t.crop, x, 0.6, z);
-      else if (vs === 2) put('mid_' + t.crop, x, 0.6, z);
-      else put('crop' + vs, x, 0.6, z);
+      if (vs === 3) put('ripe_' + t.crop, x, 0.73, z);
+      else if (vs === 2) put('mid_' + t.crop, x, 0.73, z);
+      else put('crop' + vs, x, 0.73, z);
     }
-    if (t.crop && t.dead) put('dead', x, 0.6, z);
+    if (t.crop && t.dead) put('dead', x, 0.73, z);
   }
   for (const name in TL.layers) {
     TL.layers[name].count = counts[name] || 0;
@@ -2317,8 +2620,11 @@ function spawnForage() {
   for (const f of spots) {
     if (G.dayFlags['picked_' + Math.round(f.x) + '_' + Math.round(f.z)]) continue;
     const g = new THREE.Group();
-    const sprite = new THREE.Mesh(new THREE.PlaneGeometry(0.7, 0.7),
-      new THREE.MeshBasicMaterial({ map: emojiTex(f.item.icon), transparent: true }));
+    // baked lit-3D forage sprite (§V6b), emoji glyph as a fallback only if
+    // the bake didn't run (CONFIG.BAKE_SPRITES off / render failure)
+    const forageTex = CropSprites['forage_' + f.item.id] || emojiTex(f.item.icon);
+    const sprite = new THREE.Mesh(new THREE.PlaneGeometry(0.5, 0.7),
+      new THREE.MeshBasicMaterial({ map: forageTex, transparent: true, alphaTest: 0.4 }));
     sprite.position.y = 0.35; g.add(sprite);
     addBlob(g, 0, 0, 0.9, 0.6);
     g.position.set(f.x, terrainHeightAt(f.x, f.z), f.z);
@@ -6906,7 +7212,7 @@ function boot() {
   // orient the camera once so billboard quaternions are final before any bake
   R.camera.position.set(0, CONFIG.CAM_OFFSET.y, CONFIG.CAM_OFFSET.z);
   R.camera.lookAt(0, 0, 0);
-  paintCropSprites();
+  bakeCropSprites3D();
   initTouch();
   layout();
   TITLE.show();
