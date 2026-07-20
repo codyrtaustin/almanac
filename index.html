@@ -388,6 +388,24 @@
   of 3fps turned out to be leaked debug WebGLRenderer instances from this
   session's own manual verification calls, not a real regression — retested
   on a clean load to confirm).
+
+  V7b — PORTRAIT REVIEW (user: "Portrait", picking the next backlog item).
+  Rendered all 12 current portraits to a debug grid before touching
+  anything — they're already in better shape than the backlog note implied:
+  PORTRAIT_EXTRA gives each villager a real, SPEC-§9-grounded distinguishing
+  trait (freckles for the outdoorsy ones, heavy brows for the gruff ones,
+  blush for shy/cheerful, glasses for bookish), all built on the Art
+  Bible's one-shadow-tone construction. Cross-checked all 12 against their
+  actual §9 traits and found exactly one real gap: Sable is SPEC's other
+  "bookish" villager (with Isolde) and got glasses on her 3D chibi model in
+  V7, but PORTRAIT_EXTRA.sable was still empty — the two renders of her
+  disagreed. Fixed: added glasses to her portrait entry. Verified across
+  all four moods (neutral/happy/sad/surprised) and both in-game render
+  sizes (56px, 84px) — glasses track correctly through every expression.
+  The rest of the "full 12-portrait rebuild" backlog item is a much larger,
+  more subjective ask (bespoke per-character face construction rather than
+  a shared parametrized template) — left open rather than guessed at without
+  more direction on what's actually wrong with the current twelve.
 -->
 <style>
   :root {
@@ -4224,7 +4242,11 @@ const PORTRAIT_EXTRA = {
   bramm: { brows: 'heavy', beard: true }, hetta: { bandana: true },
   corwin: { freckles: true }, isolde: { glasses: true }, rolf: { brows: 'heavy', stubble: true },
   maren: { blush: true }, greta: { freckles: true }, aldwin: { beard: true, glasses: true },
-  ness: { beard: true, brows: 'heavy' }, fen: { blush: true }, pip: { freckles: true }, sable: {}
+  // sable: SPEC §9's other "bookish" villager (with Isolde) — matches the
+  // glasses already added to her 3D chibi model this session; portrait was
+  // left blank before, an inconsistency between the two renders of her.
+  ness: { beard: true, brows: 'heavy' }, fen: { blush: true }, pip: { freckles: true },
+  sable: { glasses: true }
 };
 function drawPortraitTo(ctx, id, mood, size) {
   const rec = CAST[id] || playerRecipe();
