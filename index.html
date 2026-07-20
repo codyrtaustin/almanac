@@ -165,6 +165,42 @@
     season particles (petals/fireflies/leaf-drift beyond weather rain/snow).
     §4/diagonal-45°-grid from the earlier visual-notes pass remains flagged,
     not queued, per that doc.
+
+  V4 — REAL CROP ROSTER + BUILDINGS PASS (user feedback: "match the actual
+  crops... I want all the crops from the original game" + "buildings look
+  bad"). Crop names/seasons/buy:sell ratios are game DATA (public facts about
+  the reference, sourced from strategywiki's public crop table), reimplemented
+  at our own ÷10 dollar scale; every sprite and line of code is original.
+  - Crops: trimmed from 18 invented entries down to the real 7 (turnip,
+    potato, cabbage, tomato, corn, eggplant, strawberry) plus two disclosed
+    exceptions — sunflower (explicitly liked, kept as-is) and pumpkin (the
+    County Fair judging mechanic — Rolf's rivalry, the ribbon, streak-
+    weighted size — is load-bearing on it, so it stays alongside the matched
+    roster rather than breaking that already-shipped system). Two departures
+    from the real game's own data, both already-documented pillar conflicts:
+    turnip keeps 2-day growth (not the faster real ratio) because Year 1's
+    prologue is authored around a plant-day1/harvest-day3 beat; strawberry
+    moves from the real game's Winter/greenhouse slot to Spring because
+    ALMANAC's winter is deliberately cropless (SPEC.md §7). Removing the 9
+    invented crops required fixing every place that referenced them by name:
+    a recipe ingredient, six villagers' gift preferences, and the Seed Swap
+    festival's seed grant — all re-mapped to the real roster, verified intact
+    (a fresh Seed Swap grants the corrected seeds; Rolf's gift preference for
+    potato was confirmed to move his hearts).
+  - Crop art: bigger fills, a shadow crease, and a real gloss highlight per
+    fruit on every family except flower/sunflower (left alone — explicitly
+    liked as-is). Verified: potato/cabbage/tomato/corn/eggplant/strawberry/
+    pumpkin all read as distinct species at normal zoom.
+  - Buildings: walls get real plank or plaster texture (alternating per
+    building, matching the art bible's "plaster or plank" law) instead of a
+    flat color; roofs get a painted shingle texture; added a stone foundation
+    course, eave fascia trim, window shutters, a plank door with a proper
+    frame and threshold step, and a chimney + static smoke wisp on working
+    buildings (general, forge, tavern, farmhouse). Verified in-browser on
+    both a plank building (general store) and a plaster one (forge) — reads
+    as a real rustic-diorama street now, not flat colored boxes.
+  Verified: full Year-1 regression (intro/plant/fair/harvest/ship) at 60fps,
+  zero console errors, $216 shipment math untouched.
 -->
 <style>
   :root {
@@ -409,13 +445,29 @@ const CONFIG = {
   TOOL_PRICES: { copper: 140 },          // per tool, 2-day forge turnaround
   TOOL_TURNAROUND: 2,
 
+  // The real HM64 crop roster (§ crop table: turnip/potato/cabbage/tomato/
+  // corn/eggplant/strawberry — names, seasons, and buy:sell ratios are game
+  // DATA, re-denominated here at our own ÷10 dollar scale; every sprite,
+  // number tweak, and line of code is original). Two deliberate departures,
+  // both disclosed: turnip stays 2-day growth (not the real game's faster
+  // ratio) because the whole Year-1 prologue is authored around a plant-day1
+  // /harvest-day3 turnip beat; strawberry moves from the real game's
+  // Winter/greenhouse-only slot to Spring, because ALMANAC's winter is
+  // deliberately cropless by design (§7 of SPEC.md — winter is the
+  // town-and-finance season, not a bug to fix). Sunflower and pumpkin are
+  // ALMANAC's own additions on top of the matched roster — sunflower because
+  // it's simply loved, pumpkin because the County Fair judging mechanic
+  // (Rolf's rivalry, the ribbon, streak-weighted size) is load-bearing on it.
   CROPS: {
-    turnip:    { name: 'Turnip',     icon: '🥕', seasons: ['Autumn', 'Spring'], days: 2, seed: 20, sell: 6,  color: 0xE8E4EC, packet: 6 },
-    carrot:    { name: 'Carrot',     icon: '🥕', seasons: ['Autumn'],           days: 3, seed: 25, sell: 8, color: 0xD98A4B, packet: 6 },
-    bokchoy:   { name: 'Bok Choy',   icon: '🥬', seasons: ['Autumn'],           days: 2, seed: 22, sell: 7,  color: 0x9CBF8A, packet: 6 },
-    potato:    { name: 'Potato',     icon: '🥔', seasons: ['Spring'],           days: 3, seed: 24, sell: 8, color: 0xC9A876, packet: 6 },
-    cucumber:  { name: 'Cucumber',   icon: '🥒', seasons: ['Spring'],           days: 2, seed: 22, sell: 7,  color: 0x6F9E5A, packet: 6 },
-    strawberry:{ name: 'Strawberry', icon: '🍓', seasons: ['Spring'],           days: 3, seed: 30, sell: 15, color: 0xC65B5B, packet: 6 }
+    turnip:     { name: 'Turnip',     icon: '🥕', seasons: ['Autumn', 'Spring'], days: 2, seed: 20, sell: 6,  color: 0xE8E4EC, packet: 6 },
+    potato:     { name: 'Potato',     icon: '🥔', seasons: ['Spring'],           days: 3, seed: 20, sell: 8,  color: 0xC9A876, packet: 6 },
+    cabbage:    { name: 'Cabbage',    icon: '🥬', seasons: ['Spring'],           days: 3, seed: 20, sell: 9,  color: 0x8FBF7A, packet: 6 },
+    strawberry: { name: 'Strawberry', icon: '🍓', seasons: ['Spring'],           days: 3, seed: 50, sell: 15, color: 0xC65B5B, packet: 6 },
+    tomato:     { name: 'Tomato',     icon: '🍅', seasons: ['Summer'],           days: 3, seed: 30, sell: 9,  color: 0xC65B4B, packet: 6, regrow: 1 },
+    corn:       { name: 'Corn',       icon: '🌽', seasons: ['Summer'],           days: 3, seed: 30, sell: 12, color: 0xE0C070, packet: 6, regrow: 2 },
+    sunflower:  { name: 'Sunflower',  icon: '🌻', seasons: ['Summer'],           days: 2, seed: 24, sell: 9,  color: 0xE8B84C, packet: 6, seedsBack: true },
+    eggplant:   { name: 'Eggplant',   icon: '🍆', seasons: ['Autumn'],           days: 3, seed: 30, sell: 6,  color: 0x6A4A7A, packet: 6, regrow: 1 },
+    pumpkin:    { name: 'Pumpkin',    icon: '🎃', seasons: ['Autumn'],           days: 3, seed: 36, sell: 20, color: 0xD08A3C, packet: 4, fair: true }
   },
   FORAGE: {
     Autumn: [ { id: 'mushroom', name: 'Mushroom',   icon: '🍄', sell: 5 },
@@ -595,13 +647,13 @@ function generateWorld(seed) {
 
   // ---- town: constant businesses, seeded order along the street ----
   const shopDefs = [
-    { id: 'general', name: "Bramm's General",     roof: 'red',  w: 10, d: 8 },
-    { id: 'forge',   name: "Hetta's Forge & Supply", roof: 'teal', w: 9, d: 7 },
-    { id: 'carpenter', name: "Corwin's Carpentry", roof: 'red',  w: 9, d: 7 },
-    { id: 'clinic',  name: 'Clinic',               roof: 'teal', w: 8, d: 7 },
-    { id: 'tavern',  name: 'The Bluebird',         roof: 'red',  w: 11, d: 9 },
-    { id: 'home1',   name: '',                     roof: 'teal', w: 7, d: 6 },
-    { id: 'home2',   name: '',                     roof: 'red',  w: 7, d: 6 }
+    { id: 'general', name: "Bramm's General",     roof: 'red',  w: 10, d: 8, wallStyle: 'plank', chimney: true },
+    { id: 'forge',   name: "Hetta's Forge & Supply", roof: 'teal', w: 9, d: 7, wallStyle: 'plaster', chimney: true },
+    { id: 'carpenter', name: "Corwin's Carpentry", roof: 'red',  w: 9, d: 7, wallStyle: 'plank' },
+    { id: 'clinic',  name: 'Clinic',               roof: 'teal', w: 8, d: 7, wallStyle: 'plaster' },
+    { id: 'tavern',  name: 'The Bluebird',         roof: 'red',  w: 11, d: 9, wallStyle: 'plankTeal', chimney: true },
+    { id: 'home1',   name: '',                     roof: 'teal', w: 7, d: 6, wallStyle: 'plaster' },
+    { id: 'home2',   name: '',                     roof: 'red',  w: 7, d: 6, wallStyle: 'plank' }
   ];
   // shuffle with gen stream (Fisher-Yates)
   for (let i = shopDefs.length - 1; i > 0; i--) {
@@ -857,6 +909,69 @@ function buildStaticTextures() {
   TEX.target = nearestTex(makeCanvas(32, 32, (ctx, w, h) => {
     ctx.strokeStyle = '#F2E8CE'; ctx.lineWidth = 4; ctx.strokeRect(2, 2, w - 4, h - 4);
     ctx.fillStyle = 'rgba(242,232,206,.28)'; ctx.fillRect(2, 2, w - 4, h - 4);
+  }));
+
+  // Buildings pass: real wall/roof/foundation textures instead of flat fills.
+  TEX.plank = nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = '#A97B55'; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#9A6E4C', '#B8916A'], 200);
+    ctx.strokeStyle = 'rgba(60,42,28,0.4)'; ctx.lineWidth = 1;
+    for (let y = 8; y < h; y += 8) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+    ctx.fillStyle = 'rgba(255,240,220,0.12)';
+    for (let y = 1; y < h; y += 8) ctx.fillRect(0, y, w, 1);
+    // knots
+    for (let i = 0; i < 3; i++) {
+      ctx.fillStyle = 'rgba(60,42,28,0.35)';
+      ctx.beginPath(); ctx.ellipse(rand('live') * w, Math.floor(rand('live') * 8) * 8 + 4, 2.4, 1.4, 0, 0, 7); ctx.fill();
+    }
+  }));
+  TEX.plankTeal = nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = '#7A9A94'; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#6C8A84', '#8AACA6'], 200);
+    ctx.strokeStyle = 'rgba(40,52,48,0.4)'; ctx.lineWidth = 1;
+    for (let y = 8; y < h; y += 8) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke(); }
+    ctx.fillStyle = 'rgba(255,255,250,0.1)';
+    for (let y = 1; y < h; y += 8) ctx.fillRect(0, y, w, 1);
+  }));
+  TEX.plaster = nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = '#E3D6B8'; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#D6C8A8', '#EDE2C8'], 260);
+    ctx.fillStyle = 'rgba(120,100,70,0.14)';
+    for (let i = 0; i < 10; i++) {
+      const x = rand('live') * w, y = rand('live') * h;
+      ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x + rand('live') * 6 - 3, y + rand('live') * 10); ctx.lineWidth = 0.6;
+      ctx.strokeStyle = 'rgba(120,100,70,0.14)'; ctx.stroke();
+    }
+  }));
+  const shingleTex = base => nearestTex(makeCanvas(64, 64, (ctx, w, h) => {
+    ctx.fillStyle = base; ctx.fillRect(0, 0, w, h);
+    const dark = 'rgba(0,0,0,0.22)', lite = 'rgba(255,255,255,0.1)';
+    for (let y = 0; y < h; y += 7) {
+      const off = (Math.floor(y / 7) % 2) * 5;
+      for (let x = -5; x < w; x += 10) {
+        ctx.fillStyle = dark; ctx.fillRect(x + off, y + 6, 10, 1);
+        ctx.strokeStyle = dark; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(x + off + 5, y); ctx.lineTo(x + off + 5, y + 7); ctx.stroke();
+      }
+      ctx.fillStyle = lite; ctx.fillRect(0, y, w, 1);
+    }
+    speckle(ctx, w, h, [dark, 'rgba(0,0,0,0.1)'], 80);
+  }));
+  TEX.shingleRed = shingleTex('#B3574C');
+  TEX.shingleTeal = shingleTex('#5E8E8A');
+  TEX.foundation = nearestTex(makeCanvas(64, 32, (ctx, w, h) => {
+    ctx.fillStyle = '#9C9C94'; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#8C8C84', '#AEAEA6'], 160);
+    ctx.strokeStyle = 'rgba(60,55,50,0.4)'; ctx.lineWidth = 1;
+    for (let x = 0; x < w; x += 11) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+  }));
+  TEX.doorPlank = nearestTex(makeCanvas(32, 48, (ctx, w, h) => {
+    ctx.fillStyle = '#6b4a30'; ctx.fillRect(0, 0, w, h);
+    speckle(ctx, w, h, ['#5e3f28', '#7a5638'], 120);
+    ctx.strokeStyle = 'rgba(40,26,16,0.5)'; ctx.lineWidth = 1;
+    for (let x = 8; x < w; x += 8) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, h); ctx.stroke(); }
+    ctx.fillStyle = '#3E3226';
+    ctx.beginPath(); ctx.arc(w - 8, h / 2, 1.6, 0, 7); ctx.fill();
   }));
 }
 
@@ -1519,14 +1634,13 @@ const CropSprites = {};   // cropId -> [stage0..stage3] textures, plus 'dead'
 // pops as the only saturated note" — foliage stays a mid desaturated green,
 // the harvestable part alone carries the crop's full saturated hue.
 const CROP_FAMILY = {
-  turnip: 'root', carrot: 'root', yam: 'root',
-  bokchoy: 'leafy', cabbage: 'leafy',
-  tomato: 'vine', pepper: 'vine', eggplant: 'vine', blueberry: 'vine',
-  cranberry: 'vine', cucumber: 'vine', peas: 'vine',
+  turnip: 'root', potato: 'root',
+  cabbage: 'leafy',
+  tomato: 'vine', eggplant: 'vine',
   corn: 'cob',
-  pumpkin: 'gourd', melon: 'gourd',
+  pumpkin: 'gourd',
   sunflower: 'flower',
-  strawberry: 'berry', potato: 'root'
+  strawberry: 'berry'
 };
 const FOLIAGE = '#4E7A48', FOLIAGE_LT = '#5E8A55', STEM = '#3E6A3E';
 function paintCropSprites() {
@@ -1565,40 +1679,55 @@ function paintCropSprites() {
     c.beginPath(); c.ellipse(cx + r * 0.6, cy - r * 0.2, r * 0.6, r * 0.45, -0.3, 0, 7); c.fill();
   };
 
+  // Reference calibration: HM64's ripe crops are large, glossy, and dense —
+  // fruit fills most of the tile and every one gets a real specular pop, not
+  // a single highlight pixel. Bigger fills + a shadow crease + a stronger
+  // gloss streak on each fruit below chase that read while staying original.
+  const gloss = (c, x, y, w, h, rot) => {
+    c.save(); c.translate(x, y); if (rot) c.rotate(rot);
+    c.fillStyle = 'rgba(255,255,255,0.55)';
+    c.beginPath(); c.ellipse(0, 0, w, h, 0, 0, 7); c.fill();
+    c.restore();
+  };
+  const shade = (c, x, y, r) => {
+    c.fillStyle = 'rgba(40,30,20,0.18)';
+    c.beginPath(); c.ellipse(x, y, r, r * 0.7, 0.6, 0, 7); c.fill();
+  };
   const FAM = {
     root: (c, color, ripe) => {
-      leafCluster(c, 16, ripe ? 16 : 18, ripe ? 9 : 6);
+      leafCluster(c, 16, ripe ? 15 : 18, ripe ? 10 : 6);
       c.strokeStyle = STEM; c.lineWidth = 2;
-      c.beginPath(); c.moveTo(16, 30); c.lineTo(16, 22); c.stroke();
+      c.beginPath(); c.moveTo(16, 30); c.lineTo(16, 21); c.stroke();
       if (ripe) {
         c.fillStyle = color;
-        c.beginPath(); c.ellipse(16, 36, 7, 8, 0, 0, 7); c.fill();
-        hi(c, 13, 31, 2, 4);
+        c.beginPath(); c.ellipse(16, 37, 9, 10, 0, 0, 7); c.fill();
+        shade(c, 19, 40, 4);
+        gloss(c, 12, 32, 2.6, 5, -0.3);
       }
     },
     leafy: (c, color, ripe) => {
-      const r = ripe ? 11 : 7;
+      const r = ripe ? 13 : 7;
       c.fillStyle = FOLIAGE_LT;
-      for (let i = 0; i < 6; i++) {
-        const a = i / 6 * Math.PI * 2;
+      for (let i = 0; i < 7; i++) {
+        const a = i / 7 * Math.PI * 2;
         c.beginPath();
-        c.ellipse(16 + Math.cos(a) * r * 0.7, 34 + Math.sin(a) * r * 0.5, r * 0.65, r * 0.4, a, 0, 7);
+        c.ellipse(16 + Math.cos(a) * r * 0.72, 34 + Math.sin(a) * r * 0.5, r * 0.7, r * 0.44, a, 0, 7);
         c.fill();
       }
       c.fillStyle = ripe ? color : FOLIAGE;
-      c.beginPath(); c.ellipse(16, 33, r * 0.7, r * 0.55, 0, 0, 7); c.fill();
-      if (ripe) hi(c, 13, 29, 3, 2);
+      c.beginPath(); c.ellipse(16, 33, r * 0.75, r * 0.6, 0, 0, 7); c.fill();
+      if (ripe) { shade(c, 20, 37, 5); gloss(c, 12, 29, 3.4, 2.2, -0.4); }
     },
     vine: (c, color, ripe) => {
-      leafCluster(c, 16, ripe ? 20 : 22, ripe ? 10 : 7);
+      leafCluster(c, 16, ripe ? 21 : 22, ripe ? 11 : 7);
       c.strokeStyle = STEM; c.lineWidth = 2;
       c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 24); c.stroke();
       if (ripe) {
-        const spots = [[10, 22, 3.2], [21, 19, 3], [15, 27, 2.6]];
+        const spots = [[9, 21, 4], [22, 18, 3.6], [15, 27, 3.2], [24, 29, 2.8]];
         c.fillStyle = color;
         for (const [x, y, r] of spots) { c.beginPath(); c.arc(x, y, r, 0, 7); c.fill(); }
-        c.fillStyle = 'rgba(255,255,255,0.4)';
-        for (const [x, y, r] of spots) c.fillRect(x - r * 0.4, y - r * 0.5, 1.6, 1.6);
+        for (const [x, y, r] of spots) shade(c, x + r * 0.4, y + r * 0.4, r * 0.55);
+        for (const [x, y, r] of spots) gloss(c, x - r * 0.35, y - r * 0.4, r * 0.4, r * 0.24, -0.4);
       }
     },
     cob: (c, color, ripe) => {
@@ -1606,24 +1735,28 @@ function paintCropSprites() {
       c.strokeStyle = STEM; c.lineWidth = 3;
       c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 16); c.stroke();
       if (ripe) {
-        c.save(); c.translate(19, 22); c.rotate(0.5);
-        c.fillStyle = color; c.beginPath(); c.ellipse(0, 0, 3.4, 9, 0, 0, 7); c.fill();
-        c.fillStyle = '#3E6A3E';
-        for (let y = -7; y < 8; y += 3) c.fillRect(-3.4, y, 6.8, 1);
-        c.fillStyle = FOLIAGE_LT;
-        c.beginPath(); c.ellipse(-1, 6, 3, 6, 0.2, 0, 7); c.fill();
-        c.restore();
+        for (const [ex, ey, er, rot] of [[19, 22, 1, 0.5], [12, 26, 0.85, -0.6]]) {
+          c.save(); c.translate(ex, ey); c.rotate(rot); c.scale(er, er);
+          c.fillStyle = color; c.beginPath(); c.ellipse(0, 0, 3.6, 9.4, 0, 0, 7); c.fill();
+          c.fillStyle = 'rgba(62,50,38,0.4)';
+          for (let y = -7; y < 8; y += 2.6) c.fillRect(-3.6, y, 7.2, 1);
+          gloss(c, -1.4, -4, 1.4, 4, 0);
+          c.fillStyle = FOLIAGE_LT;
+          c.beginPath(); c.ellipse(-1, 6.5, 3.4, 6.5, 0.2, 0, 7); c.fill();
+          c.restore();
+        }
       }
     },
     gourd: (c, color, ripe) => {
       if (!ripe) { leafCluster(c, 16, 30, 8); return; }
-      leafCluster(c, 9, 36, 5);
+      leafCluster(c, 8, 37, 5);
       c.fillStyle = color;
-      c.beginPath(); c.ellipse(17, 35, 12, 10, 0, 0, 7); c.fill();
-      c.strokeStyle = 'rgba(62,50,38,0.3)'; c.lineWidth = 1.4;
-      for (const dx of [-6, 0, 6]) { c.beginPath(); c.ellipse(17 + dx * 0.3, 35, 3, 9.5, 0, 0, 7); c.stroke(); }
-      c.fillStyle = STEM; c.fillRect(15, 24, 3, 5);
-      hi(c, 11, 28, 3, 3);
+      c.beginPath(); c.ellipse(17, 35, 13, 11, 0, 0, 7); c.fill();
+      c.strokeStyle = 'rgba(62,50,38,0.35)'; c.lineWidth = 1.6;
+      for (const dx of [-7, -2.3, 2.3, 7]) { c.beginPath(); c.ellipse(17 + dx * 0.3, 35, 3.2, 10.5, 0, 0, 7); c.stroke(); }
+      c.fillStyle = STEM; c.fillRect(15, 23, 3.5, 5.5);
+      shade(c, 24, 40, 6);
+      gloss(c, 10, 29, 3.4, 4.4, -0.4);
     },
     flower: (c, color, ripe) => {
       c.strokeStyle = STEM; c.lineWidth = 3;
@@ -1642,9 +1775,9 @@ function paintCropSprites() {
       }
     },
     berry: (c, color, ripe) => {
-      leafCluster(c, 16, 34, ripe ? 9 : 6);
+      leafCluster(c, 16, 34, ripe ? 10 : 6);
       if (ripe) {
-        const spots = [[11, 39, 2.6], [20, 40, 2.8], [16, 43, 2.4]];
+        const spots = [[10, 38, 3.2], [21, 39, 3.4], [16, 43, 3], [24, 34, 2.6]];
         c.fillStyle = color;
         for (const [x, y, r] of spots) {
           c.beginPath(); c.moveTo(x, y - r);
@@ -1652,10 +1785,11 @@ function paintCropSprites() {
           c.bezierCurveTo(x - r, y + r * 0.4, x - r, y - r, x, y - r);
           c.fill();
         }
+        for (const [x, y, r] of spots) shade(c, x + r * 0.3, y + r * 0.3, r * 0.5);
         c.fillStyle = '#F2E8CE';
-        for (let i = 0; i < 3; i++) c.fillRect(9 + i * 5, 30 + (i % 2) * 3, 2, 2);
-        c.fillStyle = 'rgba(255,255,255,0.4)';
-        for (const [x, y, r] of spots) c.fillRect(x - 1, y - r * 0.5, 1.4, 1.4);
+        for (let i = 0; i < 3; i++) c.fillRect(9 + i * 5, 29 + (i % 2) * 3, 2, 2);
+        c.fillStyle = 'rgba(255,255,255,0.5)';
+        for (const [x, y, r] of spots) c.fillRect(x - r * 0.35, y - r * 0.55, 1.8, 1.8);
       }
     }
   };
@@ -1750,16 +1884,47 @@ function makeRoof(w, d, h, mat) {
   return new THREE.Mesh(geo, mat);
 }
 
+// Buildings pass: textured plank/plaster walls, shingle roofs, fascia trim,
+// a stone foundation course, shuttered windows, a plank door with a real
+// threshold, and a chimney + static smoke wisp on working buildings — the
+// "rustic diorama" register the art direction calls for, not flat boxes.
+const WALL_TEX = { plank: 'plank', plankTeal: 'plankTeal', plaster: 'plaster' };
+function wallMaterial(style) {
+  const key = 'wall_' + (style || 'plaster');
+  if (!MAT[key]) {
+    const tex = TEX[WALL_TEX[style] || 'plaster'];
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    MAT[key] = new THREE.MeshLambertMaterial({ map: tex });
+  }
+  return MAT[key];
+}
+function roofMaterial(color) {
+  const key = 'roofTex_' + color;
+  if (!MAT[key]) {
+    const tex = color === 'teal' ? TEX.shingleTeal : TEX.shingleRed;
+    tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+    MAT[key] = new THREE.MeshLambertMaterial({ map: tex });
+  }
+  return MAT[key];
+}
 function makeBuilding(def) {
   const g = new THREE.Group();
   const h = def.h || 3.4;
-  const wall = new THREE.Mesh(new THREE.BoxGeometry(def.w, h, def.d),
-    def.wall || MAT.plaster);
+  const wallMat = wallMaterial(def.wallStyle);
+  const wall = new THREE.Mesh(new THREE.BoxGeometry(def.w, h, def.d), wallMat);
   wall.position.y = h / 2; g.add(wall);
+  // foundation course
+  const found = new THREE.Mesh(new THREE.BoxGeometry(def.w + 0.24, 0.3, def.d + 0.24),
+    new THREE.MeshLambertMaterial({ map: TEX.foundation }));
+  found.position.y = 0.15; g.add(found);
   const roofH = def.w * 0.32;
-  const roof = makeRoof(def.w + 1.2, def.d + 1.2, roofH,
-    def.roof === 'teal' ? MAT.roofTeal : MAT.roofRed);
+  const roof = makeRoof(def.w + 1.2, def.d + 1.2, roofH, roofMaterial(def.roof));
   roof.position.y = h; g.add(roof);
+  // fascia trim along the eaves, front and back
+  for (const dz of [1, -1]) {
+    const fascia = new THREE.Mesh(new THREE.BoxGeometry(def.w + 1.0, 0.16, 0.14), MAT.woodDark);
+    fascia.position.set(0, h + 0.02, dz * (def.d / 2 + 0.56)); g.add(fascia);
+  }
   // Art Bible §8: roof snow-load on upper faces, winter only — built once,
   // visibility toggled by season rather than rebuilding the building mesh.
   const snowCap = new THREE.Mesh(new THREE.BoxGeometry(def.w * 0.85, 0.12, 0.7),
@@ -1769,17 +1934,39 @@ function makeBuilding(def) {
   g.add(snowCap);
   R.roofSnowCaps = R.roofSnowCaps || [];
   R.roofSnowCaps.push(snowCap);
-  // oversized door, camera-south face
-  const door = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 2.5), MAT.door);
+  // oversized plank door, real frame + threshold step
+  const door = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 2.5),
+    new THREE.MeshLambertMaterial({ map: TEX.doorPlank }));
   door.position.set(0, 1.25, def.d / 2 + 0.03); g.add(door);
-  const frame = new THREE.Mesh(new THREE.PlaneGeometry(2.0, 2.7), MAT.woodDark);
-  frame.position.set(0, 1.35, def.d / 2 + 0.02); g.add(frame);
-  // windows
+  const frame = new THREE.Mesh(new THREE.BoxGeometry(2.0, 2.7, 0.12), MAT.woodDark);
+  frame.position.set(0, 1.35, def.d / 2 - 0.02); g.add(frame);
+  const step = new THREE.Mesh(new THREE.BoxGeometry(2.1, 0.16, 0.5),
+    new THREE.MeshLambertMaterial({ map: TEX.foundation }));
+  step.position.set(0, 0.08, def.d / 2 + 0.5); g.add(step);
+  // shuttered windows
+  if (!MAT.shutter) MAT.shutter = lambert('#5E4A38');
+  const shutterMat = MAT.shutter;
   for (const wx of [-def.w / 4 - 0.4, def.w / 4 + 0.4]) {
     const win = new THREE.Mesh(new THREE.PlaneGeometry(1.2, 1.2),
       new THREE.MeshBasicMaterial({ map: TEX.windowDark }));
     win.position.set(wx, 1.7, def.d / 2 + 0.03);
     g.add(win); R.windowMeshes.push(win);
+    for (const sx of [-0.85, 0.85]) {
+      const shutter = new THREE.Mesh(new THREE.BoxGeometry(0.4, 1.3, 0.08), shutterMat);
+      shutter.position.set(wx + sx, 1.7, def.d / 2 + 0.02); g.add(shutter);
+    }
+  }
+  // chimney + a static smoke wisp on working buildings
+  if (def.chimney) {
+    const chim = new THREE.Mesh(new THREE.BoxGeometry(0.55, 1.6, 0.55),
+      new THREE.MeshLambertMaterial({ map: TEX.foundation }));
+    chim.position.set(def.w / 2 - 0.7, h + roofH * 0.55, -0.3); g.add(chim);
+    for (let i = 0; i < 3; i++) {
+      const puff = new THREE.Mesh(new THREE.PlaneGeometry(0.4 + i * 0.15, 0.4 + i * 0.15),
+        new THREE.MeshBasicMaterial({ color: '#C9CFCB', transparent: true, opacity: 0.32 - i * 0.07, depthWrite: false }));
+      puff.position.set(def.w / 2 - 0.7 + i * 0.12, h + roofH * 0.55 + 0.9 + i * 0.55, -0.3);
+      puff.rotation.x = -Math.PI / 5; g.add(puff);
+    }
   }
   if (def.name) {
     const sign = new THREE.Mesh(new THREE.PlaneGeometry(4.4, 1.1),
@@ -1808,7 +1995,7 @@ function buildWorldScene() {
 
   W.doors = [];
   // farmhouse
-  const house = makeBuilding({ w: W.house.w, d: W.house.d, h: 3.8, roof: 'red', name: G.farmName });
+  const house = makeBuilding({ w: W.house.w, d: W.house.d, h: 3.8, roof: 'red', name: G.farmName, wallStyle: 'plank', chimney: true });
   house.position.set(W.house.x, 0, W.house.z); WG.add(house);
   addBlob(WG, W.house.x, W.house.z + 1, W.house.w * 1.5, 0.55);
   registerBox(W.house.x, W.house.z, W.house.w / 2 + 0.2, W.house.d / 2 + 0.2);
@@ -1816,7 +2003,7 @@ function buildWorldScene() {
 
   // shops along main street
   for (const s of W.shops) {
-    const b = makeBuilding({ w: s.w, d: s.d, roof: s.roof, name: s.name });
+    const b = makeBuilding({ w: s.w, d: s.d, roof: s.roof, name: s.name, wallStyle: s.wallStyle, chimney: s.chimney });
     b.position.set(s.x, 0, s.z); WG.add(b);
     addBlob(WG, s.x, s.z + 1, s.w * 1.5, 0.5);
     registerBox(s.x, s.z, s.w / 2 + 0.2, s.d / 2 + 0.2);
@@ -3404,17 +3591,17 @@ function displayHearts(id) {
 }
 const SOCIAL = {
   prefs: {
-    bramm:  { loved: ['strawberry', 'berries', 'honeycomb'], liked: ['walnut', 'carrot'], disliked: ['wintergreen'] },
+    bramm:  { loved: ['strawberry', 'berries', 'honeycomb'], liked: ['walnut', 'potato'], disliked: ['wintergreen'] },
     hetta:  { loved: ['potato', 'wildleek'], liked: ['mushroom', 'walnut'], disliked: ['daffodil'] },
     corwin: { loved: ['walnut', 'pinecone'], liked: ['berries', 'mushroom'], disliked: [] },
-    isolde: { loved: ['wintergreen', 'daffodil'], liked: ['cucumber', 'bokchoy'], disliked: ['mushroom'] },
-    rolf:   { loved: ['carrot', 'potato'], liked: ['turnip', 'bokchoy'], disliked: ['daffodil'] },
-    maren:  { loved: ['wildleek', 'mushroom'], liked: ['cucumber', 'bokchoy', 'turnip'], disliked: [] },
-    greta:  { loved: ['honeycomb', 'strawberry'], liked: ['carrot', 'berries'], disliked: ['mushroom'] },
+    isolde: { loved: ['wintergreen', 'daffodil'], liked: ['cabbage', 'wildleek'], disliked: ['mushroom'] },
+    rolf:   { loved: ['potato', 'cabbage'], liked: ['turnip', 'tomato'], disliked: ['daffodil'] },
+    maren:  { loved: ['wildleek', 'mushroom'], liked: ['tomato', 'turnip'], disliked: [] },
+    greta:  { loved: ['honeycomb', 'strawberry'], liked: ['corn', 'berries'], disliked: ['mushroom'] },
     aldwin: { loved: ['daffodil', 'pinecone'], liked: ['walnut', 'wintergreen'], disliked: [] },
     ness:   { loved: ['mushroom', 'walnut'], liked: ['pinecone'], disliked: ['daffodil'] },
     fen:    { loved: ['daffodil', 'pinecone'], liked: ['wintergreen'], disliked: ['honeycomb'] },
-    pip:    { loved: ['berries', 'strawberry'], liked: ['honeycomb', 'cucumber'], disliked: ['wintergreen'] },
+    pip:    { loved: ['berries', 'strawberry'], liked: ['honeycomb', 'corn'], disliked: ['wintergreen'] },
     sable:  { loved: ['wintergreen', 'walnut'], liked: ['mushroom', 'pinecone'], disliked: [] }
   },
   // absolute day-of-year (0..11): spring 0-2, summer 3-5, autumn 6-8, winter 9-11
@@ -3926,25 +4113,8 @@ function socialTalk(npc) {
   say(lines);
 }
 /* ==================== CONTENT: the full tables (phase 3) ================= */
-// ~18 crops across three growing seasons (winter cropless by design, §7).
-// Regrow crops produce every `regrow` days after maturity.
-Object.assign(CONFIG.CROPS, {
-  // spring
-  peas:      { name: 'Peas',      icon: '🫛', seasons: ['Spring'], days: 3, seed: 26, sell: 8,  color: 0x7FA85A, packet: 6, regrow: 2 },
-  cabbage:   { name: 'Cabbage',   icon: '🥬', seasons: ['Spring'], days: 3, seed: 32, sell: 9, color: 0x8FBF7A, packet: 6 },
-  // summer
-  tomato:    { name: 'Tomato',    icon: '🍅', seasons: ['Summer'], days: 3, seed: 28, sell: 9,  color: 0xC65B4B, packet: 6, regrow: 1 },
-  corn:      { name: 'Corn',      icon: '🌽', seasons: ['Summer'], days: 3, seed: 30, sell: 12, color: 0xE0C070, packet: 6, regrow: 2 },
-  melon:     { name: 'Melon',     icon: '🍈', seasons: ['Summer'], days: 3, seed: 34, sell: 12, color: 0xA8C88A, packet: 6 },
-  sunflower: { name: 'Sunflower', icon: '🌻', seasons: ['Summer'], days: 2, seed: 24, sell: 9, color: 0xE8B84C, packet: 6, seedsBack: true },
-  pepper:    { name: 'Pepper',    icon: '🫑', seasons: ['Summer'], days: 2, seed: 26, sell: 7,  color: 0xB3574C, packet: 6, regrow: 2 },
-  blueberry: { name: 'Blueberry', icon: '🫐', seasons: ['Summer'], days: 3, seed: 32, sell: 10, color: 0x6A6AA0, packet: 6, regrow: 2 },
-  // autumn
-  pumpkin:   { name: 'Pumpkin',   icon: '🎃', seasons: ['Autumn'], days: 3, seed: 36, sell: 20, color: 0xD08A3C, packet: 4, fair: true },
-  yam:       { name: 'Yam',       icon: '🍠', seasons: ['Autumn'], days: 2, seed: 26, sell: 8,  color: 0xB07E52, packet: 6, regrow: 2 },
-  eggplant:  { name: 'Eggplant',  icon: '🍆', seasons: ['Autumn'], days: 3, seed: 28, sell: 6, color: 0x6A4A7A, packet: 6, regrow: 2 },
-  cranberry: { name: 'Cranberry', icon: '🍒', seasons: ['Autumn'], days: 3, seed: 34, sell: 11, color: 0xA34A4A, packet: 6, regrow: 2 }
-});
+// The crop roster now lives entirely in CONFIG.CROPS (p02_config.js) —
+// the real HM64 roster plus sunflower and pumpkin, both disclosed additions.
 // summer forage joins the table
 CONFIG.FORAGE.Summer = [
   { id: 'honeycomb', name: 'Honeycomb', icon: '🍯', sell: 12 },
@@ -4077,7 +4247,7 @@ function backpackCap() { return G.backpack || 12; }
 function stackCount() { return Object.keys(G.inventory).length; }
 
 const RECIPES = [
-  { id: 'roast', name: 'Field Roast', icon: '🍲', a: 'potato', b: 'carrot', stamina: 20, teacher: 'maren' },
+  { id: 'roast', name: 'Field Roast', icon: '🍲', a: 'potato', b: 'cabbage', stamina: 20, teacher: 'maren' },
   { id: 'jam', name: 'Berry Jam', icon: '🫙', a: 'berries', b: 'strawberry', stamina: 18, teacher: 'greta' },
   { id: 'tea', name: 'Winter Tea', icon: '🍵', a: 'wintergreen', b: 'honeycomb', stamina: 25, teacher: 'isolde' }
 ];
@@ -4144,8 +4314,8 @@ function runFestival(season) {
         'Someone presses a fat bundle of mixed packets into your hands, and the afternoon dissolves into seed talk and pie.'
       ] },
       { fn: () => {
-        for (const id of ['seed_cabbage', 'seed_peas', 'seed_strawberry']) addItem(id, 3);
-        jline('The Seed Swap. Came home with cabbage, peas and strawberry starts, plus three contradictory opinions about each.');
+        for (const id of ['seed_cabbage', 'seed_potato', 'seed_strawberry']) addItem(id, 3);
+        jline('The Seed Swap. Came home with cabbage, potato and strawberry starts, plus three contradictory opinions about each.');
         sfx('coin');
       } },
       { fn: endDay }
