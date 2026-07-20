@@ -44,9 +44,28 @@ only, per the project's technique-not-expression rule (see the header of
    explicitly calls for "sharpened HM64" — crisp pixels replacing that blur.
    Current sharp rendering is correct per pillar §3; no action needed.
 
-## Status
+## Status — superseded by the Art Bible v1.0 (2026-07-19)
 
-Waiting on an art bible from the user before scoping implementation. When
-that arrives, re-derive priority against it rather than the ranking above —
-the ranking here is purely "distance from reference," not "importance to the
-final look."
+The user's art bible arrived and is now the authoritative spec (see the "V3 —
+ART BIBLE v1.0 PASS" block in `index.html`'s header comment for the full
+implementation record). Resolving each finding above against it:
+
+1. **Crop sprites** — addressed. Redesigned per Art Bible §5: 32×48 canvases,
+   7 per-family silhouettes across all 18 crops, saturated fruit-pop color.
+   Verified: a ripe turnip now reads as a root bulb + leaf tuft, not a blob.
+2. **Farm ground scrub overlay** — addressed. Cut the SCRUFF tile's brown
+   wash from 0.45 to 0.18 opacity per Art Bible §2's correction that unworked
+   field grass should stay lush, not dull.
+3. **Wood-grain dialogue box** — declined. The Art Bible's own §9 UI chrome
+   section reaffirms the existing flat cream/border box construction; it does
+   not call for a wood-grain texture. Treating the bible as authoritative
+   over this pre-bible suggestion — no change made.
+4. **Diagonal 45° world grid** — still flagged, not queued. The art bible
+   doesn't address this either way; the structural-risk/locked-camera-pillar
+   concern from the original finding stands. Needs explicit user sign-off.
+5. **Sharp rendering vs. N64 blur** — unchanged, still correct per pillar.
+
+See `index.html`'s header comment for the complete art-bible implementation
+record, including what shipped this pass and what's explicitly backlogged
+(icon manifest, custom bitmap font, full tile atlas, character geometry
+hooks, remaining portrait fidelity, ambient season particles).

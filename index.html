@@ -106,6 +106,65 @@
     framebuffer-resolution render target — pixel density is matched via the
     zone-height/character-scale ratio instead, which verified correctly
     on-screen without the extra render-target complexity.
+
+  V3 — ART BIBLE v1.0 PASS (the user's calibration doc; engine-data-derived
+  ratios/curves reimplemented as original CSS/canvas/geometry, no expressive
+  content ported). Verified in-browser against the doc's own §13 checklist:
+  - §1 light curve: applyGrade() rebuilt as five graded stops (day incl. a
+    06-08 morning ramp / golden / sunset / dusk / night) keyed off the
+    existing seasonal DUSK_HOUR/NIGHT_HOUR anchors (golden = dusk-2h, sunset
+    = dusk-1h) rather than fixed clock hours, so winter's early dusk still
+    gets its own. Verified numerically: ambient steps 0.68→0.78 by noon,
+    holds flat till golden hour, eases to the 0.55 night floor by NIGHT_HOUR.
+    Snow now rides the sunny curve (no cool-multiply darkening — confirmed
+    ambient stays 0.78 and background matches the sun day exactly); rain/storm
+    keep a blue-cap tint only, never a darkness ramp (confirmed ambient never
+    drops for weather).
+  - §2 seasonal ramps: SEASON_TILES extended with path/stone/water/sky/wood
+    per season (previously grass-only); terrain atlas and tree bakes thread
+    through it. SCRUFF (unworked farm ground) overlay cut from a 0.45-opacity
+    wash to a 0.18 sparse tell — was reading the whole field dull/khaki
+    against the reference's lush unworked grass (see VISUAL_NOTES.md finding
+    #2, now addressed). Autumn round-tree canopy mixes the three specified
+    tones per-lump on one bake rather than a flat hue-shift.
+  - §5 crops: full redesign — 32x48 canvases (was 24x24 square), 7 silhouette
+    families (root/leafy/vine/cob/gourd/flower/berry) mapped across all 18
+    crops so each reads as its species at a glance, saturated fruit-pop color
+    against desaturated foliage. This was VISUAL_NOTES.md finding #1, the
+    single biggest gap versus the reference — verified fixed: a ripe turnip
+    now shows a distinct white root bulb + leaf tuft, not a pale circle.
+  - §6 characters: CAST palette re-keyed to the doc's signature-hue table
+    (data-only; geometry hooks like glasses/braids/brooms not built — flagged
+    below). Found and fixed a real brand-law violation while auditing green
+    usage: ledger green was selectable as a player shirt color at character
+    creation, breaking "nowhere else, ever" — swapped for a mossy olive.
+  - §7 portraits: added the one-step warm shadow the construction recipe
+    calls for (shared by all 12 through the existing drawPortraitTo). Ran the
+    doc's own gate — evaluated Maren's alone before touching the rest — and
+    it reads warm/charming; no fallback ladder needed, so the shared function
+    upgrade already covers all twelve without a special case.
+  - §8: roof snow-load added as a pre-built, visibility-toggled plane per
+    building (not a rebuild-per-season) — confirmed 8 caps show in winter.
+  - §9: heart pips recolored to the 5-tier ramp (empty/sprout/gold/warm/deep)
+    as a gradient across the EXISTING 10-pip scale — cosmetic only; did not
+    change pip count or any of the "N hearts" gates already shipped and
+    tested in phases 2-4 (vignettes, contracts, birthdays all cite the 0-10
+    scale in dialogue and UI copy). The doc's box-metric spec (cream/border,
+    3 lines, portrait left) matches what phase 1 already shipped — no change
+    needed there, and it supersedes an earlier ad-hoc "wood-grain box" idea
+    from a pre-bible visual-comparison pass (see VISUAL_NOTES.md) — declined.
+  - Explicitly NOT done this pass (backlog, flagged not silently dropped):
+    §3 shared-family quantization palettes (currently per-texture, already
+    hits the ≤16-color banding goal, just not cross-texture-shared) · §4 full
+    ~40-tile/season atlas manifest (shore edges, water-edge sets, ford, path
+    junction — have a working ~16-tile subset) · §6 character silhouette
+    geometry hooks (glasses, braids, brooms, per-character scale) · §7 full
+    12-portrait rebuild beyond the shared shadow pass · §9 custom 6x8 bitmap
+    font (using the doc's own sanctioned fallback: system font, integer-
+    scaled) · §10 the 82-icon manifest (still emoji-based) · §11 ambient
+    season particles (petals/fireflies/leaf-drift beyond weather rain/snow).
+    §4/diagonal-45°-grid from the earlier visual-notes pass remains flagged,
+    not queued, per that doc.
 -->
 <style>
   :root {
@@ -425,6 +484,13 @@ function calendarDay(dayIndex) {
 /* ============================== HELPERS ================================== */
 const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 const lerp = (a, b, t) => a + (b - a) * t;
+function lerpHex(a, b, t) {
+  const pa = parseInt(a.slice(1), 16), pb = parseInt(b.slice(1), 16);
+  const ar = pa >> 16 & 255, ag = pa >> 8 & 255, ab = pa & 255;
+  const br = pb >> 16 & 255, bg = pb >> 8 & 255, bb = pb & 255;
+  const r = Math.round(lerp(ar, br, t)), g = Math.round(lerp(ag, bg, t)), bl = Math.round(lerp(ab, bb, t));
+  return '#' + ((1 << 24) + (r << 16) + (g << 8) + bl).toString(16).slice(1);
+}
 const dist2 = (ax, az, bx, bz) => { const dx = ax - bx, dz = az - bz; return dx * dx + dz * dz; };
 const $ = id => document.getElementById(id);
 function seasonOf(day) { return CONFIG.SEASONS[Math.floor(day / CONFIG.SEASON_DAYS) % 4]; }
@@ -981,11 +1047,17 @@ function quantizeCanvas(canvas, n) {
 }
 
 /* ---- seasonal tile-family palettes: real repaints, not hue shifts ---- */
+// Art Bible §2: per-material seasonal ramps (our own original palette,
+// calibrated against the reference's color RELATIONSHIPS, not copied values).
 const SEASON_TILES = {
-  Spring: { grass: '#7FA86A', grassLight: '#93BA78', grassDark: '#5E8A55', fleck: '#C8DCA0' },
-  Summer: { grass: '#6B9C58', grassLight: '#7FAE68', grassDark: '#4E7A48', fleck: '#8FBF6A' },
-  Autumn: { grass: '#9AA060', grassLight: '#B0A868', grassDark: '#7A8450', fleck: '#C4A45C' },
-  Winter: { grass: '#DDE4E0', grassLight: '#ECF0EC', grassDark: '#B8C2BC', fleck: '#F4F6F4' }
+  Spring: { grass: '#7FA86A', grassLight: '#93B87C', grassDark: '#5E8A55', fleck: '#C8DCA0',
+    path: '#B99A6B', stone: '#9C9C94', water: '#6FA3B8', sky: '#BFDCE8', particle: '#E8C8D4', wood: '#A97B55' },
+  Summer: { grass: '#8CA85E', grassLight: '#A6B468', grassDark: '#6E8A4E', fleck: '#B4C078',
+    path: '#C2A070', stone: '#9C9C94', water: '#64A0B4', sky: '#B4D6E4', particle: '#E8E2A0', wood: '#A97B55' },
+  Autumn: { grass: '#A0925A', grassLight: '#B0A26A', grassDark: '#7E7346', fleck: '#8A7648',
+    path: '#B0926A', stone: '#9C9C94', water: '#7A9AA6', sky: '#C6D8DC', particle: '#C08A4A', wood: '#9A6E4C' },
+  Winter: { grass: '#E8EAE6', grassLight: '#F2F4F0', grassDark: '#C9CFCB', fleck: '#9AA08C',
+    path: '#A6906B', stone: '#A4A8A2', water: '#8FA8B8', sky: '#D2DCE0', particle: '#F0F2EE', wood: '#8A6248' }
 };
 function paintTileInto(ctx, col, row, painter) {
   ctx.save();
@@ -1032,7 +1104,7 @@ function buildTerrainAtlas(season) {
     }
   };
   [T.GRASS0, T.GRASS1, T.GRASS2].forEach((idx, v) => paintTileInto(ctx, ...at(idx), grassPainter(v)));
-  const pathColor = winter ? '#8C7A5E' : P.path;   // winter: dark path cuts through snow
+  const pathColor = S.path;   // seasonal (§2) — winter's is already the dark packed-cut tone
   paintTileInto(ctx, ...at(T.PATH), c => {
     c.fillStyle = pathColor; c.fillRect(0, 0, 32, 32);
     speck(c, [winter ? '#7A6A50' : '#A8895C', winter ? '#9C8A6C' : '#C9AC7C'], 70);
@@ -1054,7 +1126,7 @@ function buildTerrainAtlas(season) {
     speck(c, ['#C4B084', '#E8D8AC'], 50);
   });
   paintTileInto(ctx, ...at(T.STONE), c => {
-    c.fillStyle = winter ? '#B4B8B4' : P.stone; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = S.stone; c.fillRect(0, 0, 32, 32);
     speck(c, ['#8C8C84', '#AEAEA6', winter ? '#D8DCD8' : '#90948C'], 55);
   });
   // grass→path transition edges (§1): fringe on the path side
@@ -1074,18 +1146,22 @@ function buildTerrainAtlas(season) {
   paintTileInto(ctx, ...at(T.EDGE_E), edge('E'));
   paintTileInto(ctx, ...at(T.EDGE_S), edge('S'));
   paintTileInto(ctx, ...at(T.EDGE_W), edge('W'));
+  // Art Bible §2 correction: HM64 keeps unworked field grass vividly green —
+  // only tilled soil goes brown. SCRUFF (the base under still-wild farm
+  // tiles) previously carried a heavy brown speckle that dulled the whole
+  // field; cut it to a light, sparse tell rather than a wash.
   paintTileInto(ctx, ...at(T.SCRUFF), c => {
     grassPainter(1)(c);
-    c.fillStyle = winter ? 'rgba(150,140,110,0.5)' : 'rgba(150,132,94,0.45)';
-    for (let i = 0; i < 8; i++) c.fillRect(Math.floor(rand('live') * 30), Math.floor(rand('live') * 30), 3, 2);
+    c.fillStyle = winter ? 'rgba(150,140,110,0.22)' : 'rgba(150,132,94,0.18)';
+    for (let i = 0; i < 4; i++) c.fillRect(Math.floor(rand('live') * 30), Math.floor(rand('live') * 30), 3, 2);
   });
   paintTileInto(ctx, ...at(T.WATER), c => {
-    c.fillStyle = P.water; c.fillRect(0, 0, 32, 32);
+    c.fillStyle = S.water; c.fillRect(0, 0, 32, 32);
     speck(c, ['#5E96AC', '#84B4C8'], 40);
   });
   paintTileInto(ctx, ...at(T.WEDGE), c => {   // shallow water edge
     c.fillStyle = '#8CB8C4'; c.fillRect(0, 0, 32, 32);
-    speck(c, ['#A4CCD4', P.water], 45);
+    speck(c, ['#A4CCD4', S.water], 45);
   });
   paintTileInto(ctx, ...at(T.SNOWP), c => {   // spare tile: packed snow / pale rock
     c.fillStyle = '#E8ECE8'; c.fillRect(0, 0, 32, 32);
@@ -1255,11 +1331,13 @@ function repaintTerrainSeason(season) {
 // that geometry/sprite split is the signature look.
 
 const PropBank = {};   // key -> { tex, w, h }  (w/h in world units)
+// Art Bible §2: tree canopy row. Autumn is three mixed tones per tree, not one
+// hue-shift — applied per-lump below so a single baked sprite reads mottled.
 const SEASON_CANOPY = {
-  Spring: { round: '#6FA85E', pine: '#4E7A55', extra: '#EAD8E4' },
-  Summer: { round: '#4E8A48', pine: '#3E6A48', extra: null },
-  Autumn: { round: '#C08A48', pine: '#5E7A50', extra: '#B3574C' },
-  Winter: { round: '#E8ECE8', pine: '#7A8A80', extra: '#F4F6F4' }
+  Spring: { round: '#6E9A5E', pine: '#4E7A55', extra: '#EAD8E4' },
+  Summer: { round: '#5E8A55', pine: '#3E6A48', extra: null },
+  Autumn: { round: ['#B3674C', '#C08A4A', '#8A6D42'], pine: '#5E7A50', extra: null },
+  Winter: { round: '#6E5A48', pine: '#7A8A80', extra: '#E8EAE6' }   // bare wood + snow cap
 };
 
 function bakePropSprites(season) {
@@ -1309,19 +1387,24 @@ function bakePropSprites(season) {
       // pyramid from a near-frontal camera — the classic low-poly tree trick
       // is to break the canopy into several smaller lumps instead).
       const g = new THREE.Group();
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 1.3, 6), lambert('#7d5a3e'));
+      const woodTone = (SEASON_TILES[season] && SEASON_TILES[season].wood) || '#7d5a3e';
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, 1.3, 6), lambert(woodTone));
       trunk.position.y = 0.65; g.add(trunk);
-      const canMat = lambert(C.round);
+      // Autumn: three mixed tones cycled per lump (§2), not one hue-shift —
+      // a single baked sprite reads mottled instead of flatly recolored.
+      const autumnMats = Array.isArray(C.round) ? C.round.map(lambert) : null;
+      const canMat = autumnMats ? null : lambert(C.round);
       const lumps = [
         [0, 2.55, 0, 1.15], [-0.75, 2.15, 0.3, 0.85], [0.8, 2.2, -0.2, 0.85],
         [0.1, 2.9, -0.5, 0.8], [-0.3, 2.85, 0.5, 0.75]
       ];
-      for (const [lx, ly, lz, lr] of lumps) {
-        const lump = new THREE.Mesh(new THREE.IcosahedronGeometry(lr, 1), canMat);
+      lumps.forEach(([lx, ly, lz, lr], i) => {
+        const mat = autumnMats ? autumnMats[i % autumnMats.length] : canMat;
+        const lump = new THREE.Mesh(new THREE.IcosahedronGeometry(lr, 1), mat);
         lump.position.set(lx, ly, lz);
         g.add(lump);
-      }
-      if (C.extra && season !== 'Winter') {
+      });
+      if (C.extra && season === 'Spring') {   // blossom flecks
         for (let i = 0; i < 5; i++) {
           const fleck = new THREE.Mesh(new THREE.SphereGeometry(0.14, 5, 4), lambert(C.extra));
           const a = i / 5 * Math.PI * 2;
@@ -1329,9 +1412,9 @@ function bakePropSprites(season) {
           g.add(fleck);
         }
       }
-      if (season === 'Winter') {
+      if (season === 'Winter' && C.extra) {   // snow cap, from the seasonal ramp
         for (const [lx, ly, lz, lr] of lumps) {
-          const snow = new THREE.Mesh(new THREE.IcosahedronGeometry(lr * 1.05, 1), lambert('#F4F6F4'));
+          const snow = new THREE.Mesh(new THREE.IcosahedronGeometry(lr * 1.05, 1), lambert(C.extra));
           snow.position.set(lx, ly + lr * 0.35, lz - 0.1);
           snow.scale.set(1, 0.55, 1);
           g.add(snow);
@@ -1342,7 +1425,8 @@ function bakePropSprites(season) {
 
     bake('treePine', () => {
       const g = new THREE.Group();
-      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 1.2, 6), lambert('#6d4e36'));
+      const woodTone2 = (SEASON_TILES[season] && SEASON_TILES[season].wood) || '#6d4e36';
+      const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.28, 1.2, 6), lambert(woodTone2));
       trunk.position.y = 0.6; g.add(trunk);
       const cone = new THREE.Mesh(new THREE.ConeGeometry(1.5, 3.4, 7), lambert(C.pine));
       cone.position.y = 2.6; g.add(cone);
@@ -1430,51 +1514,157 @@ function makePropSprite(key, x, z, scale) {
 
 /* ---- crops as painted sprite stages (§3) ---- */
 const CropSprites = {};   // cropId -> [stage0..stage3] textures, plus 'dead'
+// Art Bible §5: bigger painted stages, per-family silhouette language so a
+// crop reads as its species from across the field, and "ripe fruit color
+// pops as the only saturated note" — foliage stays a mid desaturated green,
+// the harvestable part alone carries the crop's full saturated hue.
+const CROP_FAMILY = {
+  turnip: 'root', carrot: 'root', yam: 'root',
+  bokchoy: 'leafy', cabbage: 'leafy',
+  tomato: 'vine', pepper: 'vine', eggplant: 'vine', blueberry: 'vine',
+  cranberry: 'vine', cucumber: 'vine', peas: 'vine',
+  corn: 'cob',
+  pumpkin: 'gourd', melon: 'gourd',
+  sunflower: 'flower',
+  strawberry: 'berry', potato: 'root'
+};
+const FOLIAGE = '#4E7A48', FOLIAGE_LT = '#5E8A55', STEM = '#3E6A3E';
 function paintCropSprites() {
+  const W = 32, H = 48;
   const mk = painter => {
     const c = document.createElement('canvas');
-    c.width = 24; c.height = 24;
+    c.width = W; c.height = H;
     painter(c.getContext('2d'));
-    quantizeCanvas(c, 12);
+    quantizeCanvas(c, 14);
     return nearestTex(c);
   };
   const hexOf = n => '#' + n.toString(16).padStart(6, '0');
+  const hi = (c, x, y, w, h) => { c.fillStyle = 'rgba(255,255,255,0.4)'; c.fillRect(x, y, w, h); };
   CropSprites.stage0 = mk(c => {   // shared seed mound
-    c.fillStyle = '#6B8A55';
-    c.fillRect(10, 18, 4, 4);
-    c.fillRect(11, 16, 2, 2);
+    c.fillStyle = '#6B5844';
+    c.beginPath(); c.ellipse(16, 42, 7, 3, 0, 0, 7); c.fill();
+    c.fillStyle = FOLIAGE; c.fillRect(14, 37, 4, 5);
   });
   CropSprites.stage1 = mk(c => {   // shared sprout
-    c.strokeStyle = '#5E8A55'; c.lineWidth = 2;
-    c.beginPath(); c.moveTo(12, 22); c.lineTo(12, 14); c.stroke();
-    c.beginPath(); c.moveTo(12, 16); c.lineTo(8, 12); c.moveTo(12, 16); c.lineTo(16, 12); c.stroke();
+    c.strokeStyle = FOLIAGE; c.lineWidth = 3; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 30); c.stroke();
+    c.beginPath(); c.moveTo(16, 34); c.lineTo(9, 26); c.moveTo(16, 34); c.lineTo(23, 26); c.stroke();
   });
   CropSprites.dead = mk(c => {     // the reaper's leavings — a withered stalk
-    c.strokeStyle = '#8C8474'; c.lineWidth = 2;
-    c.beginPath(); c.moveTo(12, 22); c.lineTo(10, 12); c.stroke();
-    c.beginPath(); c.moveTo(11, 16); c.lineTo(7, 14); c.stroke();
-    c.fillStyle = '#7A7466'; c.fillRect(9, 10, 3, 2);
+    c.strokeStyle = '#8A7A66'; c.lineWidth = 3; c.lineCap = 'round';
+    c.beginPath(); c.moveTo(16, 44); c.lineTo(13, 22); c.stroke();
+    c.beginPath(); c.moveTo(14, 30); c.lineTo(7, 26); c.moveTo(15, 26); c.lineTo(20, 21); c.stroke();
+    c.fillStyle = '#6E5A48'; c.beginPath(); c.ellipse(13, 20, 4, 3, 0.3, 0, 7); c.fill();
   });
+
+  const leafCluster = (c, cx, cy, r) => {
+    c.fillStyle = FOLIAGE;
+    c.beginPath(); c.ellipse(cx, cy, r * 1.1, r * 0.75, 0, 0, 7); c.fill();
+    c.fillStyle = FOLIAGE_LT;
+    c.beginPath(); c.ellipse(cx - r * 0.6, cy - r * 0.3, r * 0.6, r * 0.45, 0.3, 0, 7); c.fill();
+    c.beginPath(); c.ellipse(cx + r * 0.6, cy - r * 0.2, r * 0.6, r * 0.45, -0.3, 0, 7); c.fill();
+  };
+
+  const FAM = {
+    root: (c, color, ripe) => {
+      leafCluster(c, 16, ripe ? 16 : 18, ripe ? 9 : 6);
+      c.strokeStyle = STEM; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(16, 30); c.lineTo(16, 22); c.stroke();
+      if (ripe) {
+        c.fillStyle = color;
+        c.beginPath(); c.ellipse(16, 36, 7, 8, 0, 0, 7); c.fill();
+        hi(c, 13, 31, 2, 4);
+      }
+    },
+    leafy: (c, color, ripe) => {
+      const r = ripe ? 11 : 7;
+      c.fillStyle = FOLIAGE_LT;
+      for (let i = 0; i < 6; i++) {
+        const a = i / 6 * Math.PI * 2;
+        c.beginPath();
+        c.ellipse(16 + Math.cos(a) * r * 0.7, 34 + Math.sin(a) * r * 0.5, r * 0.65, r * 0.4, a, 0, 7);
+        c.fill();
+      }
+      c.fillStyle = ripe ? color : FOLIAGE;
+      c.beginPath(); c.ellipse(16, 33, r * 0.7, r * 0.55, 0, 0, 7); c.fill();
+      if (ripe) hi(c, 13, 29, 3, 2);
+    },
+    vine: (c, color, ripe) => {
+      leafCluster(c, 16, ripe ? 20 : 22, ripe ? 10 : 7);
+      c.strokeStyle = STEM; c.lineWidth = 2;
+      c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 24); c.stroke();
+      if (ripe) {
+        const spots = [[10, 22, 3.2], [21, 19, 3], [15, 27, 2.6]];
+        c.fillStyle = color;
+        for (const [x, y, r] of spots) { c.beginPath(); c.arc(x, y, r, 0, 7); c.fill(); }
+        c.fillStyle = 'rgba(255,255,255,0.4)';
+        for (const [x, y, r] of spots) c.fillRect(x - r * 0.4, y - r * 0.5, 1.6, 1.6);
+      }
+    },
+    cob: (c, color, ripe) => {
+      leafCluster(c, 16, 38, 6);
+      c.strokeStyle = STEM; c.lineWidth = 3;
+      c.beginPath(); c.moveTo(16, 44); c.lineTo(16, 16); c.stroke();
+      if (ripe) {
+        c.save(); c.translate(19, 22); c.rotate(0.5);
+        c.fillStyle = color; c.beginPath(); c.ellipse(0, 0, 3.4, 9, 0, 0, 7); c.fill();
+        c.fillStyle = '#3E6A3E';
+        for (let y = -7; y < 8; y += 3) c.fillRect(-3.4, y, 6.8, 1);
+        c.fillStyle = FOLIAGE_LT;
+        c.beginPath(); c.ellipse(-1, 6, 3, 6, 0.2, 0, 7); c.fill();
+        c.restore();
+      }
+    },
+    gourd: (c, color, ripe) => {
+      if (!ripe) { leafCluster(c, 16, 30, 8); return; }
+      leafCluster(c, 9, 36, 5);
+      c.fillStyle = color;
+      c.beginPath(); c.ellipse(17, 35, 12, 10, 0, 0, 7); c.fill();
+      c.strokeStyle = 'rgba(62,50,38,0.3)'; c.lineWidth = 1.4;
+      for (const dx of [-6, 0, 6]) { c.beginPath(); c.ellipse(17 + dx * 0.3, 35, 3, 9.5, 0, 0, 7); c.stroke(); }
+      c.fillStyle = STEM; c.fillRect(15, 24, 3, 5);
+      hi(c, 11, 28, 3, 3);
+    },
+    flower: (c, color, ripe) => {
+      c.strokeStyle = STEM; c.lineWidth = 3;
+      c.beginPath(); c.moveTo(16, 44); c.lineTo(16, ripe ? 16 : 22); c.stroke();
+      leafCluster(c, 11, 34, 4);
+      if (ripe) {
+        c.fillStyle = color;
+        for (let i = 0; i < 10; i++) {
+          const a = i / 10 * Math.PI * 2;
+          c.beginPath(); c.ellipse(16 + Math.cos(a) * 8, 14 + Math.sin(a) * 8, 3.2, 1.8, a, 0, 7); c.fill();
+        }
+        c.fillStyle = '#6E5A38';
+        c.beginPath(); c.arc(16, 14, 5, 0, 7); c.fill();
+        c.fillStyle = 'rgba(0,0,0,0.15)';
+        for (let i = 0; i < 5; i++) c.fillRect(13 + rand('live') * 6, 11 + rand('live') * 6, 1, 1);
+      }
+    },
+    berry: (c, color, ripe) => {
+      leafCluster(c, 16, 34, ripe ? 9 : 6);
+      if (ripe) {
+        const spots = [[11, 39, 2.6], [20, 40, 2.8], [16, 43, 2.4]];
+        c.fillStyle = color;
+        for (const [x, y, r] of spots) {
+          c.beginPath(); c.moveTo(x, y - r);
+          c.bezierCurveTo(x + r, y - r, x + r, y + r * 0.4, x, y + r);
+          c.bezierCurveTo(x - r, y + r * 0.4, x - r, y - r, x, y - r);
+          c.fill();
+        }
+        c.fillStyle = '#F2E8CE';
+        for (let i = 0; i < 3; i++) c.fillRect(9 + i * 5, 30 + (i % 2) * 3, 2, 2);
+        c.fillStyle = 'rgba(255,255,255,0.4)';
+        for (const [x, y, r] of spots) c.fillRect(x - 1, y - r * 0.5, 1.4, 1.4);
+      }
+    }
+  };
+
   for (const id in CONFIG.CROPS) {
     const color = hexOf(CONFIG.CROPS[id].color);
-    CropSprites['mid_' + id] = mk(c => {     // leafy adolescent
-      c.fillStyle = '#4E7A48';
-      c.beginPath(); c.ellipse(12, 15, 7, 5, 0, 0, 7); c.fill();
-      c.fillStyle = '#5E8A55';
-      c.beginPath(); c.ellipse(9, 12, 4, 3, 0, 0, 7); c.ellipse(16, 13, 4, 3, 0, 0, 7); c.fill();
-      c.strokeStyle = '#3E6A3E'; c.lineWidth = 2;
-      c.beginPath(); c.moveTo(12, 22); c.lineTo(12, 16); c.stroke();
-    });
-    CropSprites['ripe_' + id] = mk(c => {    // mature, fruit showing
-      c.fillStyle = '#4E7A48';
-      c.beginPath(); c.ellipse(12, 13, 8, 5, 0, 0, 7); c.fill();
-      c.strokeStyle = '#3E6A3E'; c.lineWidth = 2;
-      c.beginPath(); c.moveTo(12, 22); c.lineTo(12, 14); c.stroke();
-      c.fillStyle = color;
-      c.beginPath(); c.arc(9, 16, 3.4, 0, 7); c.arc(16, 15, 3, 0, 7); c.fill();
-      c.fillStyle = 'rgba(255,255,255,0.35)';
-      c.fillRect(8, 14, 2, 1); c.fillRect(15, 13, 2, 1);
-    });
+    const fam = FAM[CROP_FAMILY[id] || 'vine'];
+    CropSprites['mid_' + id] = mk(c => fam(c, color, false));
+    CropSprites['ripe_' + id] = mk(c => fam(c, color, true));
   }
 }
 /* ========================= RENDER: scene build =========================== */
@@ -1566,9 +1756,19 @@ function makeBuilding(def) {
   const wall = new THREE.Mesh(new THREE.BoxGeometry(def.w, h, def.d),
     def.wall || MAT.plaster);
   wall.position.y = h / 2; g.add(wall);
-  const roof = makeRoof(def.w + 1.2, def.d + 1.2, def.w * 0.32,
+  const roofH = def.w * 0.32;
+  const roof = makeRoof(def.w + 1.2, def.d + 1.2, roofH,
     def.roof === 'teal' ? MAT.roofTeal : MAT.roofRed);
   roof.position.y = h; g.add(roof);
+  // Art Bible §8: roof snow-load on upper faces, winter only — built once,
+  // visibility toggled by season rather than rebuilding the building mesh.
+  const snowCap = new THREE.Mesh(new THREE.BoxGeometry(def.w * 0.85, 0.12, 0.7),
+    new THREE.MeshBasicMaterial({ color: '#E8EAE6' }));
+  snowCap.position.set(0, h + roofH - 0.08, 0);
+  snowCap.visible = false;
+  g.add(snowCap);
+  R.roofSnowCaps = R.roofSnowCaps || [];
+  R.roofSnowCaps.push(snowCap);
   // oversized door, camera-south face
   const door = new THREE.Mesh(new THREE.PlaneGeometry(1.7, 2.5), MAT.door);
   door.position.set(0, 1.25, def.d / 2 + 0.03); g.add(door);
@@ -1594,6 +1794,7 @@ function buildWorldScene() {
   if (R.worldGroup) R.scene.remove(R.worldGroup);
   R.worldGroup = new THREE.Group();
   R.windowMeshes = [];
+  R.roofSnowCaps = [];
   const WG = R.worldGroup;
 
   // HM64 pass §1: true tile-mesh terrain — one draw call, per-tile atlas UVs,
@@ -1828,7 +2029,9 @@ function buildTileLayers(parent) {
   mk('log', new THREE.CylinderGeometry(0.3, 0.3, 1.4, 8), MAT.trunk);
   mk('sprinkler', new THREE.CylinderGeometry(0.1, 0.16, 0.5, 6), lambert('#8C9499'));
   // crops are painted sprite stages, billboarded like everything alive (§3)
-  const cropQuad = new THREE.PlaneGeometry(0.85, 0.85);
+  // Art Bible §5: crop canvases are 32x48 (2:3) now, not square — taller
+  // sprites read as standing plants rather than flat pancakes on the soil.
+  const cropQuad = new THREE.PlaneGeometry(0.8, 1.2);
   const sprMat = tex => new THREE.MeshBasicMaterial({ map: tex, transparent: true, alphaTest: 0.4 });
   mk('dead', cropQuad, sprMat(CropSprites.dead));
   mk('crop0', cropQuad, sprMat(CropSprites.stage0));
@@ -1870,11 +2073,11 @@ function rebuildTiles() {
     else if (t.obj) put(t.obj, x, t.obj === 'rock' ? 0.2 : 0.25, z);
     if (t.crop && !t.dead) {
       const vs = cropVisualStage(t);
-      if (vs === 3) put('ripe_' + t.crop, x, 0.42, z);
-      else if (vs === 2) put('mid_' + t.crop, x, 0.42, z);
-      else put('crop' + vs, x, 0.42, z);
+      if (vs === 3) put('ripe_' + t.crop, x, 0.6, z);
+      else if (vs === 2) put('mid_' + t.crop, x, 0.6, z);
+      else put('crop' + vs, x, 0.6, z);
     }
-    if (t.crop && t.dead) put('dead', x, 0.42, z);
+    if (t.crop && t.dead) put('dead', x, 0.6, z);
   }
   for (const name in TL.layers) {
     TL.layers[name].count = counts[name] || 0;
@@ -1957,32 +2160,68 @@ function tickParticles(dt) {
 }
 
 /* ---- day-grade overlays, window lights, sky ---- */
+// Art Bible §1: the reference engine steps a 24h light curve (night floor
+// ~31% brightness, golden hour holds R while G/B fall, sunset deepens that
+// warmth, dusk begins the night stack). Translated as five graded stops keyed
+// off the same DUSK_HOUR/NIGHT_HOUR anchors the seasonal daylight system
+// already uses — golden hour = dusk-2h, sunset = dusk-1h — rather than fixed
+// clock hours, so winter's early dusk still gets its own golden hour etc.
 function applyGrade() {
   const season = seasonOf(G.day);
-  const dusk = CONFIG.DUSK_HOUR[season], night = CONFIG.NIGHT_HOUR[season];
+  const duskHour = CONFIG.DUSK_HOUR[season], nightHour = CONFIG.NIGHT_HOUR[season];
+  const goldenStart = duskHour - 2, sunsetStart = duskHour - 1;
   const soft = $('gradeSoft'), mult = $('gradeMult');
   const P = CONFIG.PALETTE;
+  const h = G.hour;
   let phase = 'day';
-  if (G.hour >= night) phase = 'night';
-  else if (G.hour >= dusk) phase = 'evening';
+  if (h >= nightHour) phase = 'night';
+  else if (h >= duskHour) phase = 'dusk';
+  else if (h >= sunsetStart) phase = 'sunset';
+  else if (h >= goldenStart) phase = 'golden';
+
+  const SOFT = '#E8A87C', MULT_WARM = '#e0c0b0', SOFT_NIGHT = '#8a94c0', MULT_NIGHT = '#4A5578';
+  soft.style.background = SOFT;
   if (phase === 'day') {
     soft.style.opacity = 0;
+    // morning ramp (§1: 06-07 dimmer, 08-11 brighter, full day from noon)
+    if (h < 8) R.ambient.intensity = lerp(0.68, 0.75, clamp((h - 6) / 2, 0, 1));
+    else if (h < 12) R.ambient.intensity = lerp(0.75, 0.78, clamp((h - 8) / 4, 0, 1));
+    else R.ambient.intensity = 0.78;
     if (WET(G.weather) || G.weather === 'snow') {
-      // one cool multiply, nothing fancier — HM64's storm-light (§2)
-      mult.style.background = '#B0B0C0';
-      mult.style.opacity = G.weather === 'storm' ? 0.5 : 0.35;
+      // snow days use the SUNNY curve (§1) — only rain/storm carry the cool
+      // multiply; winter gloom is a modern instinct, not a reference fact.
+      if (WET(G.weather)) {
+        mult.style.background = '#B0B0C0';
+        mult.style.opacity = G.weather === 'storm' ? 0.42 : 0.2;
+      } else mult.style.opacity = 0;
     } else mult.style.opacity = 0;
-    R.ambient.intensity = 0.78;
-    R.scene.background.set(WET(G.weather) || G.weather === 'cloud' ? '#A8BCC4' : P.sky);
-  } else if (phase === 'evening') {
-    soft.style.background = '#E8A87C'; soft.style.opacity = 0.5;
-    mult.style.background = '#e0c0b0'; mult.style.opacity = 0.25;
-    R.ambient.intensity = 0.72;
+    const daySky = (SEASON_TILES[season] && SEASON_TILES[season].sky) || P.sky;
+    R.scene.background.set(WET(G.weather) || G.weather === 'cloud' ? '#A8BCC4' : daySky);
+  } else if (phase === 'golden') {
+    const t = clamp((h - goldenStart) / 1, 0, 1);
+    soft.style.opacity = lerp(0, 0.35, t);
+    mult.style.opacity = 0;
+    R.ambient.intensity = lerp(0.78, 0.75, t);
+    R.scene.background.set((SEASON_TILES[season] && SEASON_TILES[season].sky) || P.sky);
+  } else if (phase === 'sunset') {
+    const t = clamp((h - sunsetStart) / 1, 0, 1);
+    soft.style.opacity = lerp(0.35, 0.5, t);
+    mult.style.background = MULT_WARM; mult.style.opacity = lerp(0, 0.2, t);
+    R.ambient.intensity = lerp(0.75, 0.72, t);
     R.scene.background.set('#D8B49A');
+  } else if (phase === 'dusk') {
+    // dusk = the night stack fading in to ~70% strength (§1)
+    const t = clamp((h - duskHour) / Math.max(0.25, nightHour - duskHour), 0, 1) * 0.7;
+    soft.style.background = lerpHex(SOFT, SOFT_NIGHT, t / 0.7);
+    soft.style.opacity = lerp(0.5, 0.3, t / 0.7);
+    mult.style.background = lerpHex(MULT_WARM, MULT_NIGHT, t / 0.7);
+    mult.style.opacity = lerp(0.2, 0.42, t);
+    R.ambient.intensity = lerp(0.72, 0.55, t);
+    R.scene.background.set(lerpHex('#D8B49A', P.skyNight, t));
   } else {
-    soft.style.background = '#8a94c0'; soft.style.opacity = 0.3;
-    mult.style.background = '#4A5578'; mult.style.opacity = 0.42;
-    R.ambient.intensity = 0.55;
+    soft.style.background = SOFT_NIGHT; soft.style.opacity = 0.3;
+    mult.style.background = MULT_NIGHT; mult.style.opacity = 0.42;
+    R.ambient.intensity = 0.55;   // lands ≈ the reference's 31% night floor
     R.scene.background.set(P.skyNight);
   }
   R.scene.fog.color.copy(R.scene.background);
@@ -1994,8 +2233,13 @@ function applyGrade() {
     if (seasonLoop && MUS.sparse !== wantSparse) startSeasonMusic(wantSparse);
     else if (!MUS.current) startSeasonMusic(wantSparse);
   }
+  // roof snow-load, winter only (§8) — toggle, don't rebuild
+  if (R.roofSnowCaps) {
+    const showSnow = season === 'Winter';
+    for (const cap of R.roofSnowCaps) cap.visible = showSnow;
+  }
   // windows go emissive by texture swap at dusk
-  const lit = phase !== 'day';
+  const lit = phase === 'dusk' || phase === 'night';
   for (const w of R.windowMeshes) {
     const want = lit ? TEX.windowLit : TEX.windowDark;
     if (w.material.map !== want) { w.material.map = want; w.material.needsUpdate = true; }
@@ -2014,7 +2258,10 @@ function applyGrade() {
 // (spec-sanctioned fallback); the bake pipeline arrives with phase 2's cast.
 const SKINS = ['#E8C49C', '#D4A374', '#B07E52', '#8A5C38'];
 const HAIRS = ['#5A4030', '#2E2620', '#B08040', '#C4643C', '#8C8C84', '#E0C070'];
-const SHIRTS = ['#5E8E8A', '#B3574C', '#4E7A5A', '#B99A6B', '#6A6AA0', '#C48A3C'];
+// Ledger green is reserved absolutely (Ledger tab, connected-shop glyphs,
+// year-review frame — nowhere else, ever); '#7E8A5E' keeps a mossy-olive
+// option in the picker without touching the brand hue.
+const SHIRTS = ['#5E8E8A', '#B3574C', '#7E8A5E', '#B99A6B', '#6A6AA0', '#C48A3C'];
 
 function makeChibi(rec) {
   const g = new THREE.Group();
@@ -2058,19 +2305,21 @@ function makeChibi(rec) {
 }
 
 // The twelve villagers: authored constants (full cast fidelity lands phase 2).
+// Art Bible §6: the thirteen keys — signature hue + garment colors per
+// character, silhouette carried by headwear/hair shape, never face detail.
 const CAST = {
-  bramm:  { name: 'Bramm',   skin: SKINS[1], hair: '#8C8C84', shirt: '#7A5C3E', hat: null },
-  hetta:  { name: 'Hetta',   skin: SKINS[2], hair: '#2E2620', shirt: '#B3574C', long: true },
-  corwin: { name: 'Corwin',  skin: SKINS[1], hair: '#B08040', shirt: '#4E7A5A' },
-  isolde: { name: 'Isolde',  skin: SKINS[0], hair: '#5A4030', shirt: '#E3D6B8', long: true },
-  rolf:   { name: 'Rolf',    skin: SKINS[2], hair: '#C4643C', shirt: '#6A6AA0', hat: '#8a6244' },
-  maren:  { name: 'Maren',   skin: SKINS[0], hair: '#C4643C', shirt: '#5E8E8A', long: true },
-  greta:  { name: 'Greta',   skin: SKINS[1], hair: '#E0C070', shirt: '#C48A3C', long: true, hat: '#B99A6B' },
-  aldwin: { name: 'Aldwin',  skin: SKINS[0], hair: '#D8D8D0', shirt: '#4E5A66' },
-  ness:   { name: 'Old Ness', skin: SKINS[3], hair: '#8C8C84', shirt: '#3E4E42', hat: '#4E5A66' },
-  fen:    { name: 'Fen',     skin: SKINS[2], hair: '#2E2620', shirt: '#8C9682' },
-  pip:    { name: 'Pip',     skin: SKINS[1], hair: '#B08040', shirt: '#C65B5B' },
-  sable:  { name: 'Sable',   skin: SKINS[0], hair: '#2E2620', shirt: '#5A4A6A', long: true }
+  bramm:  { name: 'Bramm',   skin: SKINS[1], hair: '#8A7A66', shirt: '#B98E4E', hat: null },
+  hetta:  { name: 'Hetta',   skin: SKINS[2], hair: '#4A4038', shirt: '#5E8E8A', long: true },
+  corwin: { name: 'Corwin',  skin: SKINS[1], hair: '#C0A06A', shirt: '#A97B55' },
+  isolde: { name: 'Isolde',  skin: SKINS[0], hair: '#6E4A3A', shirt: '#EDE2CC', long: true },
+  rolf:   { name: 'Rolf',    skin: SKINS[2], hair: '#D0B06A', shirt: '#8A5444', hat: '#B99A6B' },
+  maren:  { name: 'Maren',   skin: SKINS[0], hair: '#7A4E38', shirt: '#5E7EA6', long: true },
+  greta:  { name: 'Greta',   skin: SKINS[1], hair: '#D8C89A', shirt: '#7E8A5E', long: true, hat: '#B99A6B' },
+  aldwin: { name: 'Aldwin',  skin: SKINS[0], hair: '#E0DCD0', shirt: '#6E7A5A', pants: '#8A8278' },
+  ness:   { name: 'Old Ness', skin: SKINS[3], hair: '#B8B4A8', shirt: '#6E6A4E', hat: '#8C8A5E' },
+  fen:    { name: 'Fen',     skin: SKINS[2], hair: '#D8D4C8', shirt: '#A8AEB4' },
+  pip:    { name: 'Pip',     skin: SKINS[1], hair: '#8A5E44', shirt: '#6E86A0', hat: '#B3574C' },
+  sable:  { name: 'Sable',   skin: SKINS[0], hair: '#3A3430', shirt: '#7A6474', long: true }
 };
 
 const ACTORS = {};   // id -> actor (player + villagers)
@@ -3192,6 +3441,14 @@ function drawPortraitTo(ctx, id, mood, size) {
   ctx.beginPath(); ctx.ellipse(42, 86, 30, 26, 0, Math.PI, 0); ctx.fill();
   ctx.fillStyle = rec.skin;
   ctx.beginPath(); ctx.arc(42, 42, 24, 0, 7); ctx.fill();
+  // Art Bible §7: one-step warm shadow per region, hard-edged (not a blend) —
+  // the construction the bible calls for is silhouette → flat regions →
+  // ONE shadow tone → sparse linework → detailed eyes only.
+  ctx.save();
+  ctx.beginPath(); ctx.arc(42, 42, 24, 0, 7); ctx.clip();
+  ctx.fillStyle = 'rgba(62,50,38,0.16)';
+  ctx.beginPath(); ctx.ellipse(50, 52, 16, 14, 0, 0, 7); ctx.fill();
+  ctx.restore();
   // hair
   ctx.fillStyle = rec.hair;
   ctx.beginPath(); ctx.arc(42, 36, 26, Math.PI * 1.02, Math.PI * 1.98); ctx.fill();
@@ -4560,13 +4817,24 @@ const LIFE = {
     const W = G.world;
     const t = W.trees[Math.floor(rand('live') * W.trees.length)];
     if (!t) return;
+    // Art Bible §6: warm white, never pure — accent on ears/legs, tail ~1/3
+    // of body length (not the near-half it was reading as before).
     const fox = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), lambert('#F0EEE8'));
+    const furMat = lambert('#EDE8DC'), accentMat = lambert('#C8A090');
+    const body = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 6), furMat);
     body.position.y = 0.3; body.scale.set(1.4, 0.9, 0.8); fox.add(body);
-    const head = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), lambert('#F0EEE8'));
+    const head = new THREE.Mesh(new THREE.ConeGeometry(0.16, 0.4, 6), furMat);
     head.position.set(0.42, 0.42, 0); head.rotation.z = -Math.PI / 2; fox.add(head);
-    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.5, 6), lambert('#E8E4DA'));
-    tail.position.set(-0.42, 0.4, 0); tail.rotation.z = Math.PI / 2.4; fox.add(tail);
+    for (const ez of [-0.1, 0.1]) {
+      const ear = new THREE.Mesh(new THREE.ConeGeometry(0.05, 0.14, 4), accentMat);
+      ear.position.set(0.5, 0.58, ez); fox.add(ear);
+    }
+    for (const lx of [-0.15, 0.15]) for (const lz of [-0.14, 0.14]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.22, 5), accentMat);
+      leg.position.set(lx, 0.1, lz); fox.add(leg);
+    }
+    const tail = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.28, 6), furMat);
+    tail.position.set(-0.4, 0.38, 0); tail.rotation.z = Math.PI / 2.4; fox.add(tail);
     addBlob(fox, 0, 0, 0.9, 0.5);
     fox.position.set(t.x + 1.2, 0, t.z + 0.8);
     R.scene.add(fox); R.fox = fox;
@@ -5052,6 +5320,27 @@ function renderInventoryTab(body) {
   }
   body.appendChild(grid);
 }
+// Art Bible §9: a 5-tier friendship ramp (empty/sprout/gold/warm/deep),
+// applied as a color gradient across our existing 10-pip scale rather than
+// changing the pip count — every gate written against "N hearts" elsewhere
+// in the game stays correct; only the color read changes.
+const HEART_EMPTY = '#C9BFA8';
+const HEART_RAMP = ['#7FA86A', '#C9A040', '#C87A5A', '#B3574C'];
+function heartTierColor(t) {
+  const seg = clamp(Math.floor(t * (HEART_RAMP.length - 1)), 0, HEART_RAMP.length - 2);
+  const frac = t * (HEART_RAMP.length - 1) - seg;
+  return lerpHex(HEART_RAMP[seg], HEART_RAMP[seg + 1], frac);
+}
+function heartPipRow(hearts) {
+  const row = el('div');
+  row.style.cssText = 'letter-spacing:1px;font-size:14px';
+  for (let i = 0; i < 10; i++) {
+    const pip = el('span', null, '♥');
+    pip.style.color = i < hearts ? heartTierColor(hearts <= 1 ? 0 : i / 9) : HEART_EMPTY;
+    row.appendChild(pip);
+  }
+  return row;
+}
 function renderVillagersTab(body) {
   const met = Object.keys(CAST).filter(id => id in G.hearts);
   if (!met.length) { body.appendChild(el('i', null, 'You haven’t really met anyone yet.')); return; }
@@ -5073,12 +5362,7 @@ function renderVillagersTab(body) {
     nm.appendChild(el('b', null, rec.name));
     info.appendChild(nm);
     const hearts = displayHearts(id);
-    const hp = el('div', null, '♥'.repeat(hearts));
-    hp.style.cssText = 'color:#B3574C;letter-spacing:1px';
-    const dim = el('span', null, '♥'.repeat(Math.max(0, 10 - hearts)));
-    dim.style.cssText = 'opacity:.22';
-    hp.appendChild(dim);
-    info.appendChild(hp);
+    info.appendChild(heartPipRow(hearts));
     if (SOCIAL.birthdays[id] !== undefined) {
       info.appendChild(el('div', null, 'Birthday: ' + SEASON_OF_BDAY(SOCIAL.birthdays[id])));
     }
