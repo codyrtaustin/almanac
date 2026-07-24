@@ -2650,7 +2650,25 @@ function buildWorldScene() {
   const pineIM = mkTreeIM('treePine', pines);
   if (roundIM) WG.add(roundIM);
   if (pineIM) WG.add(pineIM);
-  for (const t of trees) addBlob(WG, t.x, t.z, 3.4 * t.s, 0.45);
+  // Ground shadow blobs, one per tree: same shape/texture/opacity for every
+  // one of them, so batch into a single InstancedMesh instead of ~65-80
+  // individual Mesh+geometry+material allocations (each its own draw call).
+  if (trees.length) {
+    const blobIM = new THREE.InstancedMesh(
+      new THREE.PlaneGeometry(1, 0.8),
+      new THREE.MeshBasicMaterial({ map: TEX.blob, transparent: true, depthWrite: false, opacity: 0.45 }),
+      trees.length);
+    trees.forEach((t, i) => {
+      const size = 3.4 * t.s;
+      dummy.position.set(t.x, 0.008, t.z);
+      dummy.rotation.set(-Math.PI / 2, 0, 0);
+      dummy.scale.set(size, size, size);
+      dummy.updateMatrix();
+      blobIM.setMatrixAt(i, dummy.matrix);
+    });
+    blobIM.frustumCulled = false;
+    WG.add(blobIM);
+  }
 
   // target highlight quad
   R.target = new THREE.Mesh(new THREE.PlaneGeometry(0.96, 0.96),
@@ -5932,7 +5950,8 @@ function boxify(text) {
     return chunks;
   });
 }
-const DLG = { queue: [], active: false, revealing: false, txt: '', shown: 0, cb: null, timer: null };
+const DLG = { queue: [], active: false, revealing: false, txt: '', shown: 0, shownF: 0, cb: null };
+const DLG_CHARS_PER_SEC = 1000 / 12;   // matches the old 24ms/+2-char setInterval pacing
 function say(lines, cb) {
   for (const l of lines) {
     const entry = typeof l === 'string' ? { who: '', text: l } : l;
@@ -5962,21 +5981,31 @@ function nextDialogue() {
     if (typeof drawPortraitTo === 'function') drawPortraitTo($('dlgPortrait').getContext('2d'), line.who, line.mood || 'neutral', 84);
     else drawPortrait(rec);
   }
-  DLG.txt = line.text; DLG.shown = 0; DLG.revealing = true;
+  DLG.txt = line.text; DLG.shown = 0; DLG.shownF = 0; DLG.revealing = true;
   $('dlg').style.display = 'block';
   $('dlgText').textContent = '';
-  clearInterval(DLG.timer);
-  DLG.timer = setInterval(() => {
-    DLG.shown += 2;
-    $('dlgText').textContent = DLG.txt.slice(0, DLG.shown);
-    if (DLG.shown % 6 < 2) sfx('blip');
-    if (DLG.shown >= DLG.txt.length) { DLG.revealing = false; clearInterval(DLG.timer); }
-  }, 24);
+}
+// Driven from the main frame() loop rather than its own setInterval, so the
+// typewriter reveal shares the rAF frame budget instead of forcing a DOM
+// text mutation (and a potential reflow, since #dlgText's height isn't
+// fixed) on an independent ~42Hz clock that used to run even during a
+// slow/dropped frame.
+function tickDialogueReveal(dt) {
+  if (!DLG.active || !DLG.revealing) return;
+  const before = DLG.shown;
+  DLG.shownF += DLG_CHARS_PER_SEC * dt;
+  const target = Math.min(DLG.txt.length, Math.floor(DLG.shownF));
+  if (target <= before) return;
+  DLG.shown = target;
+  $('dlgText').textContent = DLG.txt.slice(0, DLG.shown);
+  if (Math.floor(target / 6) > Math.floor(before / 6)) sfx('blip');
+  if (DLG.shown >= DLG.txt.length) DLG.revealing = false;
 }
 function advanceDialogue() {
   if (!DLG.active) return;
   if (DLG.revealing) {
-    clearInterval(DLG.timer); DLG.revealing = false;
+    DLG.revealing = false;
+    DLG.shown = DLG.txt.length;
     $('dlgText').textContent = DLG.txt;
   } else nextDialogue();
 }
@@ -7447,6 +7476,7 @@ function frame(tms) {
   if (t - G.fps.last >= 1) { G.fps.value = G.fps.frames; G.fps.frames = 0; G.fps.last = t; }
   if (!G.world || !R.worldGroup) return;
 
+  tickDialogueReveal(dt);
   tickTime(dt);
   const p = player();
   if (p) {
